@@ -1,0 +1,6 @@
+# Made by xcodegen and build-core.sh; never committed.
+*.xcodeproj/
+/build/
+/Generated/
+/Support/
+/SharedClipCore.xcframework/

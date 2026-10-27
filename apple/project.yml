@@ -1,0 +1,149 @@
+# XcodeGen spec for the macOS and iOS apps (see apple/README.md). Run apple/build-core.sh first: the targets compile
+# its Generated/SharedClipCore.swift and link its SharedClipCore.xcframework.
+name: SharedClip
+options:
+  bundleIdPrefix: com.noobsbot.sharedclip
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+settings:
+  base:
+    # Set by CI (.github/set-version.sh), never by hand: see VERSIONING.md.
+    MARKETING_VERSION: "0.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    # The core is built for Apple silicon simulators only.
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+
+schemes:
+  SharedClip-macOS:
+    build:
+      targets:
+        SharedClip-macOS: all
+  SharedClip-iOS:
+    build:
+      targets:
+        SharedClip-iOS: all
+
+targets:
+  SharedClip-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - Shared
+      - macOS
+      - Generated/SharedClipCore.swift
+    dependencies:
+      - framework: SharedClipCore.xcframework
+        embed: false
+      # Used by the core's Rust dependencies; a static library doesn't bring its own links.
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    info:
+      path: Support/macOS-Info.plist
+      properties:
+        CFBundleDisplayName: Shared Clipboard
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSUIElement: true
+        NSLocalNetworkUsageDescription: Shared Clipboard finds and connects to your other devices on this network.
+        NSBonjourServices: [_sharedclip._udp]
+    settings:
+      base:
+        PRODUCT_NAME: SharedClip
+        PRODUCT_BUNDLE_IDENTIFIER: com.noobsbot.sharedclip.mac
+        ENABLE_HARDENED_RUNTIME: "YES"
+
+  SharedClip-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - Shared
+      - iOS
+      - Generated/SharedClipCore.swift
+    dependencies:
+      - framework: SharedClipCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - target: ShareExtension
+      - target: SendControl
+    info:
+      path: Support/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: Shared Clipboard
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: Shared Clipboard finds and connects to your other devices on this network.
+        NSBonjourServices: [_sharedclip._udp]
+        NSCameraUsageDescription: Shared Clipboard scans the pairing code shown on your other device.
+    entitlements:
+      path: Support/iOS.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.noobsbot.sharedclip]
+    settings:
+      base:
+        PRODUCT_NAME: SharedClip
+        PRODUCT_BUNDLE_IDENTIFIER: com.noobsbot.sharedclip
+
+  # Sends shared text, images and files with its own short-lived node (ShareExtension/ShareViewController.swift).
+  ShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ShareExtension
+      - Shared/ClipModel.swift
+      - Shared/Bonjour.swift
+      - Shared/Clipboard.swift
+      - Generated/SharedClipCore.swift
+    dependencies:
+      - framework: SharedClipCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    info:
+      path: Support/ShareExtension-Info.plist
+      properties:
+        CFBundleDisplayName: Shared Clipboard
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSLocalNetworkUsageDescription: Shared Clipboard finds and connects to your other devices on this network.
+        NSBonjourServices: [_sharedclip._udp]
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsImageWithMaxCount: 10
+              NSExtensionActivationSupportsFileWithMaxCount: 10
+    entitlements:
+      path: Support/ShareExtension.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.noobsbot.sharedclip]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.noobsbot.sharedclip.share
+
+  # The Control Center button (iOS 18). It shares SendClipboardIntent with the app, which runs it.
+  SendControl:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - Control
+      - iOS/Intents.swift
+    info:
+      path: Support/SendControl-Info.plist
+      properties:
+        CFBundleDisplayName: Shared Clipboard
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.noobsbot.sharedclip.control
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) CONTROL_WIDGET"
