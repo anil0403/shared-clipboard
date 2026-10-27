@@ -19,9 +19,10 @@
         android:name="android.hardware.camera"
         android:required="false" />
 
-    <!-- No backup: the device key in filesDir must not be copied to another device. -->
+    <!-- No backup or device transfer: the device key in filesDir must not be copied to another device. -->
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/no_backup"
         android:icon="@mipmap/ic_launcher"
         android:label="Shared Clipboard"
         android:theme="@style/App">

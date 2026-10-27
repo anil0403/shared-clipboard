@@ -1,5 +1,6 @@
 package com.noobsbot.sharedclip
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -182,6 +183,7 @@ class SendTile : TileService() {
             startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE))
         } else {
             @Suppress("DEPRECATION")
+            @SuppressLint("StartActivityAndCollapseDeprecated") // only below Android 14, where it's the only way
             startActivityAndCollapse(intent)
         }
     }
