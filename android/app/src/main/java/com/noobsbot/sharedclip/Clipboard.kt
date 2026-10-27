@@ -87,7 +87,10 @@ private fun Context.saveDownload(file: ClipFile): Uri? = try {
 suspend fun Context.sendClipboard(auto: Boolean) {
     val clip = getSystemService(ClipboardManager::class.java).primaryClip ?: return
     val desc = clip.description
-    if (desc.extras?.getBoolean(SENSITIVE) == true) return
+    if (desc.extras?.getBoolean(SENSITIVE) == true) {
+        if (!auto) toast("Not sent: the app that copied it marked it as private")
+        return
+    }
     if (auto && (desc.timestamp == Shared.lastSent || Shared.node == null)) return
     Shared.lastSent = desc.timestamp
     val items = List(clip.itemCount) { clip.getItemAt(it) }
@@ -162,8 +165,12 @@ class SendActivity : ComponentActivity() {
         if (started) return
         started = true
         lifecycleScope.launch {
-            block()
-            finish()
+            // Always close: an invisible window left open would block the screen.
+            try {
+                block()
+            } finally {
+                finish()
+            }
         }
     }
 }

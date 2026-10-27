@@ -115,19 +115,19 @@ class ClipService : Service() {
         cm.allNetworks.firstOrNull { cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true }
             ?.let { cm.bindProcessToNetwork(it) }
         scope.launch {
-            val node = try {
-                Node.start(Config(filesDir.path, name, Platform.ANDROID, 0u), events)
+            try {
+                val node = Node.start(Config(filesDir.path, name, Platform.ANDROID, 0u), events)
+                node.setPaused(Shared.paused)
+                Shared.devices = node.devices()
+                advertise(node)
+                Shared.node = node
+                Shared.error = null
             } catch (e: Exception) {
                 Log.e(TAG, "The core didn't start", e)
                 Shared.error = e.message ?: e.toString()
                 stopSelf()
                 return@launch
             }
-            Shared.error = null
-            Shared.node = node
-            node.setPaused(Shared.paused)
-            Shared.devices = node.devices()
-            advertise(node)
             cm.registerNetworkCallback(wifiRequest, wifiCallback, Handler(mainLooper))
             ContextCompat.registerReceiver(
                 this@ClipService, dataSaver, IntentFilter(ConnectivityManager.ACTION_RESTRICT_BACKGROUND_CHANGED),
