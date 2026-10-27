@@ -1,0 +1,372 @@
+# Builds, signs and publishes the apps of a `v*` tag (VERSIONING.md, "How it is set up"). version.yml starts it for
+# each tag it makes, since a tag pushed with the workflow token starts no workflow by itself. A tag pushed by hand starts
+# it too, and so does Run workflow with a tag. The version is set from the tag before building and isn't committed,
+# since a beta is only a tag.
+#
+#   plan         which apps exist yet
+#   linux        the tarball, built on Debian 13: the oldest glibc we support, and a program built against an older
+#                glibc runs on a newer one. linux-check then starts it on Arch and Debian.
+#   After the owner approves (the `release` environment; one approval covers the three jobs, which start together):
+#     linux-sign   signs the tarball
+#     android      the signed APK for GitHub, and the app bundle to Play internal testing
+#     apple        the macOS app, signed with Developer ID, notarized and stapled; and the iOS build, to TestFlight
+#   publish      SHA256SUMS, uploads everything to the draft release and publishes it. A release becomes "latest"; a
+#                beta stays a pre-release and is never "latest".
+# Sending a build from TestFlight to App Review, and from Play internal testing to production, stays by hand.
+#
+# Set up, in Settings ▸ Environments ▸ `release`: required reviewers (the owner), and these as its environment secrets,
+# so that only these jobs can read them. A step whose secret is missing is skipped with a notice.
+#   MINISIGN_SECRET_KEY          the whole minisign secret key file; signs every file on the GitHub release
+#   MINISIGN_PASSWORD            its password (leave it unset for a key made with `minisign -G -W`)
+#   ANDROID_KEYSTORE_BASE64      the Android signing keystore (.jks), in base64
+#   ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+#   PLAY_SERVICE_ACCOUNT_JSON    a Google Play service account key (JSON) that may release to testing tracks. Play
+#                                takes API uploads only after the first bundle was uploaded by hand.
+#   APPLE_CERTIFICATES_P12       one .p12, in base64, with the Apple Development, Apple Distribution and Developer ID
+#                                Application certificates and their private keys
+#   APPLE_CERTIFICATES_PASSWORD  its password
+#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8
+#                                an App Store Connect API key (App Manager role; ASC_KEY_P8 is the .p8 file's text),
+#                                for provisioning profiles, notarization and TestFlight
+# And one repository variable (Settings ▸ Variables; not a secret): APPLE_TEAM_ID. The apple job runs on macOS, whose
+# minutes cost 10×, so it only starts once that is set.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to build and publish, like v1.2.3 (empty for the tag you run it from)
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  # Where XcodeGen writes the Apple project.
+  XCODE_PROJECT: apple/SharedClip.xcodeproj
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      linux: ${{ steps.apps.outputs.linux }}
+      android: ${{ steps.apps.outputs.android }}
+      apple: ${{ steps.apps.outputs.apple }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - id: apps
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          .github/set-version.sh --check "$TAG" >/dev/null # a tag that is no version stops here
+          for app in linux android apple; do
+            if [[ -d $app ]]; then echo "$app=true"; else echo "$app=false"; fi
+          done >> "$GITHUB_OUTPUT"
+          if [[ -d apple && -z $APPLE_TEAM_ID ]]; then
+            echo "::notice::The APPLE_TEAM_ID variable is not set, so there is no macOS or iOS build."
+          fi
+
+  linux:
+    needs: plan
+    if: needs.plan.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    container: debian:13
+    timeout-minutes: 45
+    steps:
+      - name: System packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates build-essential pkgconf rustup jq \
+            libwayland-dev libdbus-1-dev
+          # Debian's own Rust is too old for our dependencies.
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: Swatinem/rust-cache@v2
+      - run: .github/set-version.sh "$TAG"
+      - name: Build and pack
+        run: |
+          name=sharedclip-${TAG#v}-x86_64-linux
+          mkdir -p "dist/$name"
+          # Every program of the linux/ package.
+          cargo build --release --locked --manifest-path linux/Cargo.toml --message-format json-render-diagnostics |
+            jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' |
+            while read -r program; do cp "$program" "dist/$name/"; done
+          [[ -n $(ls "dist/$name") ]] || { echo "::error::linux/ built no program"; exit 1; }
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          rm -r "dist/$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/
+
+  # Every library found, none too old: `--version` only runs once they all load.
+  linux-check:
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        system: ["archlinux:latest", "debian:13"]
+    container: ${{ matrix.system }}
+    steps:
+      - name: Runtime libraries
+        run: |
+          if command -v pacman >/dev/null; then
+            pacman -Syu --noconfirm --needed wayland dbus
+          else
+            apt-get update
+            apt-get install -y --no-install-recommends libwayland-client0 libdbus-1-3
+          fi
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux
+          path: dist
+      - name: Start
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          mkdir app
+          tar -xzf dist/*.tar.gz -C app --strip-components=1
+          for program in app/*; do
+            if ldd "$program" | grep 'not found'; then echo "::error::$program is missing libraries on $SYSTEM"; exit 1; fi
+            "$program" --version
+          done
+
+  linux-sign:
+    needs: linux-check
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: .github
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux
+          path: dist
+      - run: .github/sign.sh dist/*.tar.gz
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: signed-linux
+          path: dist/
+
+  android:
+    needs: [plan, linux-check]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.android == 'true' }}
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 60
+    steps:
+      - name: Secrets
+        id: has
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PLAY: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [[ -n $KEYSTORE ]]; then echo "key=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::ANDROID_KEYSTORE_BASE64 is not set, so there is no Android build."; fi
+          if [[ -n $KEYSTORE && -n $PLAY ]]; then echo "play=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n $KEYSTORE ]]; then echo "::notice::PLAY_SERVICE_ACCOUNT_JSON is not set, so nothing goes to Play."; fi
+      - uses: actions/checkout@v7
+        if: steps.has.outputs.key
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-java@v6
+        if: steps.has.outputs.key
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - uses: Swatinem/rust-cache@v2
+        if: steps.has.outputs.key
+      - name: Build and sign
+        id: build
+        if: steps.has.outputs.key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+          .github/set-version.sh "$TAG"
+          keystore=$RUNNER_TEMP/release.jks
+          base64 --decode <<<"$ANDROID_KEYSTORE_BASE64" > "$keystore"
+          # Gradle signs with the injected settings, as Android Studio's "Generate Signed App Bundle or APK" does, so
+          # the build files need no signing config.
+          (cd android && ./gradlew assembleRelease bundleRelease \
+            -Pandroid.injected.signing.store.file="$keystore" \
+            -Pandroid.injected.signing.store.password="$ANDROID_KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$ANDROID_KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$ANDROID_KEY_PASSWORD")
+          mkdir dist
+          cp android/app/build/outputs/apk/release/*.apk "dist/sharedclip-${TAG#v}-android.apk"
+          cp android/app/build/outputs/bundle/release/*.aab "$RUNNER_TEMP/app.aab"
+          aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -1)
+          echo "package=$("$aapt2" dump packagename dist/*.apk)" >> "$GITHUB_OUTPUT"
+      - uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        if: steps.has.outputs.play
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ steps.build.outputs.package }}
+          releaseFiles: ${{ runner.temp }}/app.aab
+          track: internal
+          status: completed
+      - run: .github/sign.sh dist/*.apk
+        if: steps.has.outputs.key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+      - uses: actions/upload-artifact@v7
+        if: steps.has.outputs.key
+        with:
+          name: signed-android
+          path: dist/
+
+  apple:
+    needs: [plan, linux-check]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.apple == 'true' && vars.APPLE_TEAM_ID != '' }}
+    runs-on: macos-latest
+    environment: release
+    timeout-minutes: 90
+    env:
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - name: Secrets
+        id: has
+        env:
+          P12: ${{ secrets.APPLE_CERTIFICATES_P12 }}
+          ASC: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          if [[ -n $P12 && -n $ASC ]]; then echo "ok=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::APPLE_CERTIFICATES_P12 or ASC_KEY_P8 is not set, so there is no macOS or iOS build."; fi
+      - uses: actions/checkout@v7
+        if: steps.has.outputs.ok
+        with:
+          ref: ${{ env.TAG }}
+      - uses: Swatinem/rust-cache@v2
+        if: steps.has.outputs.ok
+      - name: Signing keychain
+        if: steps.has.outputs.ok
+        env:
+          APPLE_CERTIFICATES_P12: ${{ secrets.APPLE_CERTIFICATES_P12 }}
+          APPLE_CERTIFICATES_PASSWORD: ${{ secrets.APPLE_CERTIFICATES_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          # As in GitHub's guide "Installing an Apple certificate on macOS runners for Xcode development".
+          keychain=$RUNNER_TEMP/signing.keychain-db
+          password=$(uuidgen)
+          base64 --decode <<<"$APPLE_CERTIFICATES_P12" > "$RUNNER_TEMP/certificates.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificates.p12" -P "$APPLE_CERTIFICATES_PASSWORD" -A -t cert -f pkcs12 \
+            -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          security list-keychain -d user -s "$keychain"
+          rm "$RUNNER_TEMP/certificates.p12"
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+      - name: Build the core and the project
+        if: steps.has.outputs.ok
+        run: |
+          brew install xcodegen
+          .github/set-version.sh "$TAG"
+          apple/build-core.sh
+          xcodegen generate --spec apple/project.yml
+      - name: macOS app, notarized; iOS build, to TestFlight
+        if: steps.has.outputs.ok
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          key=$RUNNER_TEMP/AuthKey.p8
+          auth=(-allowProvisioningUpdates -authenticationKeyPath "$key" -authenticationKeyID "$ASC_KEY_ID"
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+          # Archives a scheme and exports it with an export method ($1 scheme, $2 platform, $3 method, $4 more options).
+          export_app() {
+            xcodebuild archive -project "$XCODE_PROJECT" -scheme "$1" -destination "generic/platform=$2" \
+              -archivePath "$RUNNER_TEMP/$1.xcarchive" DEVELOPMENT_TEAM="$APPLE_TEAM_ID" "${auth[@]}"
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+              "<plist version=\"1.0\"><dict><key>method</key><string>$3</string>" \
+              "<key>teamID</key><string>$APPLE_TEAM_ID</string>${4:-}</dict></plist>" > "$RUNNER_TEMP/$1.plist"
+            xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/$1.xcarchive" \
+              -exportOptionsPlist "$RUNNER_TEMP/$1.plist" -exportPath "$RUNNER_TEMP/$1" "${auth[@]}"
+          }
+
+          export_app SharedClip-macOS macOS developer-id
+          app=$(echo "$RUNNER_TEMP"/SharedClip-macOS/*.app)
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --key "$key" --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" --wait
+          xcrun stapler staple "$app"
+          mkdir dist
+          ditto -c -k --keepParent "$app" "dist/SharedClip-${TAG#v}-macos.zip"
+
+          # Exporting with destination "upload" sends the build to App Store Connect, where it goes to TestFlight.
+          export_app SharedClip-iOS iOS app-store-connect '<key>destination</key><string>upload</string>'
+      - run: .github/sign.sh dist/*.zip
+        if: steps.has.outputs.ok
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+      - uses: actions/upload-artifact@v7
+        if: steps.has.outputs.ok
+        with:
+          name: signed-apple
+          path: dist/
+
+  publish:
+    needs: [linux-sign, android, apple]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: signed-*
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p dist
+          cd dist
+          shopt -s nullglob
+          programs=(*.tar.gz *.zip *.apk)
+          if (( ${#programs[@]} )); then sha256sum "${programs[@]}" > SHA256SUMS; fi
+          if [[ $TAG == *-* ]]; then pre=(--prerelease) latest=false; else pre=() latest=true; fi
+          # version.yml has made the draft already; a tag pushed by hand has none yet.
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --draft --generate-notes "${pre[@]}"
+          files=(*)
+          if (( ${#files[@]} )); then gh release upload "$TAG" --clobber "${files[@]}"; fi
+          # Published only once its files are there, so an update check never finds it without them.
+          gh release edit "$TAG" --draft=false --latest="$latest" "${pre[@]}"
