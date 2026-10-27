@@ -1,0 +1,4 @@
+<!-- Received images, shared on the clipboard through FileProvider (Clipboard.kt). -->
+<paths>
+    <cache-path name="clips" path="clips/" />
+</paths>

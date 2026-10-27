@@ -1,0 +1,7 @@
+<resources>
+    <!-- Compose draws the screens; this only gives the window the right light or dark background. -->
+    <style name="App" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>
