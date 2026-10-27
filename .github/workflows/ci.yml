@@ -1,0 +1,110 @@
+# Checks every push to main and every pull request. Rust (the core and the Linux app) always; Android and Apple only
+# when their files, the core or the Rust workspace changed, since builds for them are slow (Apple's run on macOS, whose
+# minutes cost 10× in a private repo). Run workflow (Actions ▸ CI) runs them all. A job for an app that doesn't exist
+# yet is skipped. version.yml makes no version while the last run on main failed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", ".trail/**", ".claude/**", "LICENSE"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", ".trail/**", ".claude/**", "LICENSE"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read # paths-filter reads a pull request's files
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Where XcodeGen writes the Apple project.
+  XCODE_PROJECT: apple/SharedClip.xcodeproj
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux app libraries
+        if: hashFiles('linux/Cargo.toml') != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-dev libdbus-1-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      android: ${{ steps.pick.outputs.android }}
+      apple: ${{ steps.pick.outputs.apple }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          filters: |
+            android: ["android/**", "core/**", "Cargo.*"]
+            apple: ["apple/**", "core/**", "Cargo.*"]
+      - id: pick
+        env:
+          ANDROID: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.android == 'true' }}
+          APPLE: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.apple == 'true' }}
+        run: |
+          # Only for apps that exist.
+          [[ -d android ]] || ANDROID=false
+          [[ -d apple ]] || APPLE=false
+          echo "android=$ANDROID" >> "$GITHUB_OUTPUT"
+          echo "apple=$APPLE" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - uses: Swatinem/rust-cache@v2 # also keeps cargo-ndk
+      # Gradle builds the core with cargo-ndk, with the runner's Android SDK and NDK (ANDROID_NDK_HOME).
+      - run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+      - run: ./gradlew assembleDebug
+        working-directory: android
+
+  apple:
+    needs: changes
+    if: needs.changes.outputs.apple == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install xcodegen
+      - run: apple/build-core.sh
+      - run: xcodegen generate --spec apple/project.yml
+      - name: Build for macOS
+        run: >-
+          xcodebuild build -project "$XCODE_PROJECT" -scheme SharedClip-macOS
+          -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO
+      - name: Build for iOS
+        run: >-
+          xcodebuild build -project "$XCODE_PROJECT" -scheme SharedClip-iOS
+          -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
