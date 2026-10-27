@@ -4,6 +4,11 @@
 
 uniffi::setup_scaffolding!();
 
+mod node;
+mod pairing;
+mod protocol;
+mod store;
+
 use std::sync::Arc;
 
 /// The wire protocol version sent in `Hello`. Not the release version (VERSIONING.md).
@@ -13,7 +18,8 @@ pub const DEFAULT_PORT: u16 = 47820;
 /// Items bigger than this are only announced (`Events::on_offer`); `Node::fetch` gets them.
 pub const SIZE_CAP: u64 = 25 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Platform {
     Linux,
     Macos,
@@ -113,100 +119,97 @@ pub trait Events: Send + Sync {
 }
 
 #[derive(uniffi::Object)]
-pub struct Node {}
+pub struct Node {
+    inner: Arc<node::Inner>,
+}
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Node {
     /// Loads or creates this device's key, starts listening and connects to paired devices it can reach.
+    /// Must be called on a tokio runtime (UniFFI provides one); the node keeps running on it.
     #[uniffi::constructor]
     pub async fn start(config: Config, events: Arc<dyn Events>) -> Result<Arc<Self>, Error> {
-        let _ = (config, events);
-        unimplemented!()
+        Ok(Arc::new(Self {
+            inner: node::Inner::start(config, events).await?,
+        }))
     }
 
     /// This device's id (its public key), for the discovery TXT record.
     pub fn id(&self) -> String {
-        unimplemented!()
+        self.inner.id.clone()
     }
 
     /// The UDP port it listens on, for the discovery record.
     pub fn port(&self) -> u16 {
-        unimplemented!()
+        self.inner.port
     }
 
     /// Discovery found device `id` at `addr` (e.g. "192.168.1.5:47820"). Connects if it's paired; remembers the
     /// address for `pair_device` if not.
     pub fn found(&self, id: String, addr: String) {
-        let _ = (id, addr);
-        unimplemented!()
+        self.inner.found(&id, &addr)
     }
 
     /// The local clipboard changed. Sends the item to the paired devices, unless it's the one the core just gave
     /// the app (`Events::on_clip`). Leave out password-manager items before calling this; the core sends all it gets.
     pub async fn copy(&self, formats: Vec<Format>, files: Vec<File>) -> Result<(), Error> {
-        let _ = (formats, files);
-        unimplemented!()
+        self.inner.copy(formats, files).await
     }
 
-    /// Gets an offered item (`Events::on_offer`) from the device that has it.
+    /// Gets an offered item (`Events::on_offer`) from the device that has it. Put the result on the clipboard
+    /// yourself: it doesn't also come through `Events::on_clip`, and `copy` won't send it back.
     pub async fn fetch(&self, id: String) -> Result<Clip, Error> {
-        let _ = id;
-        unimplemented!()
+        self.inner.fetch(&id).await
     }
 
     /// The last 50 items, newest first.
     pub fn history(&self) -> Vec<Clip> {
-        unimplemented!()
+        self.inner.lock().history.clone()
     }
 
     /// The paired devices.
     pub fn devices(&self) -> Vec<Device> {
-        unimplemented!()
+        self.inner.lock().devices()
     }
 
     /// A link to show as a QR code: this device's id, addresses and a one-time secret, valid for 10 minutes.
+    /// A new link replaces the previous one.
     pub fn pairing_link(&self) -> String {
-        unimplemented!()
+        pairing::link(&self.inner)
     }
 
     /// Pairs with the device that showed `link`.
     pub async fn pair_link(&self, link: String) -> Result<Device, Error> {
-        let _ = link;
-        unimplemented!()
+        pairing::pair_link(&self.inner, &link).await
     }
 
     /// Pairs with a device found by discovery, comparing a 6-digit code (`Events::on_pairing_code`).
     pub async fn pair_device(&self, id: String) -> Result<Device, Error> {
-        let _ = id;
-        unimplemented!()
+        pairing::pair_device(&self.inner, &id).await
     }
 
     /// The user says the code shown for device `id` matches (or not).
     pub fn confirm_pairing(&self, id: String, accept: bool) {
-        let _ = (id, accept);
-        unimplemented!()
+        pairing::confirm_pairing(&self.inner, &id, accept)
     }
 
     /// Forgets device `id`, and tells the other paired devices to forget it too.
     pub async fn unpair(&self, id: String) -> Result<(), Error> {
-        let _ = id;
-        unimplemented!()
+        self.inner.unpair(&id).await
     }
 
     /// On mobile data or a limited network: text still goes right away, everything else becomes an offer.
     pub fn set_metered(&self, metered: bool) {
-        let _ = metered;
-        unimplemented!()
+        self.inner.set_metered(metered)
     }
 
     /// Pause: nothing is sent or received until unpaused.
     pub fn set_paused(&self, paused: bool) {
-        let _ = paused;
-        unimplemented!()
+        self.inner.lock().paused = paused;
     }
 
     /// Closes all connections. The node can't be used afterwards.
     pub async fn stop(&self) {
-        unimplemented!()
+        self.inner.stop().await
     }
 }
