@@ -1,0 +1,22 @@
+[package]
+name = "sharedclip-core"
+version.workspace = true
+edition.workspace = true
+description = "Shared Clipboard core: identity, pairing, protocol and transfers, for every app"
+
+[lib]
+name = "sharedclip"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+# Generates the Swift and Kotlin bindings: cargo run -p sharedclip-core --features bindgen --bin uniffi-bindgen -- ...
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+uniffi = { version = "0.32.2", features = ["tokio"] }
+thiserror = "2"

@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "com.noobsbot.sharedclip.core"
+
+[bindings.swift]
+module_name = "SharedClipCore"
