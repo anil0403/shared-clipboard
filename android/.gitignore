@@ -1,0 +1,8 @@
+# Gradle and Android Studio output; the Rust .so files and Kotlin bindings are built into app/build
+.gradle/
+build/
+.kotlin/
+local.properties
+.idea/
+*.iml
+captures/
