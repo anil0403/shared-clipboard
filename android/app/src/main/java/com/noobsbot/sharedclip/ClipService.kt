@@ -70,7 +70,7 @@ fun Context.service(action: String? = null, id: String? = null) {
 
 /** Runs a core call, showing what went wrong as a toast. */
 fun Context.call(block: suspend (Node) -> Unit) {
-    val node = Shared.node ?: return toast("Shared Clipboard is still starting")
+    val node = Shared.node ?: return toast("Shared Clipboard is still starting").also { service() }
     Shared.scope.launch {
         try {
             block(node)
@@ -233,6 +233,7 @@ class ClipService : Service() {
             .setContentTitle(title)
             .setOngoing(true)
             .setContentIntent(activity(MainActivity::class.java))
+            .addAction(action("Send clipboard", activity(SendActivity::class.java)))
             .addAction(action(if (Shared.paused) "Resume" else "Pause", serviceIntent(PAUSE, null)))
             .build()
     }
