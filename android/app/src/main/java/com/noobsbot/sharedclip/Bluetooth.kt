@@ -24,8 +24,10 @@ import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.noobsbot.sharedclip.core.Device
+import com.noobsbot.sharedclip.core.BluetoothSink
 import com.noobsbot.sharedclip.core.Node
+import com.noobsbot.sharedclip.core.bluetoothPsmUuid
+import com.noobsbot.sharedclip.core.bluetoothServiceUuid
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -201,6 +203,7 @@ class Bluetooth(private val context: Context) {
             }
         } finally {
             link.closed()
+            link.destroy()
         }
     }
 
@@ -247,6 +250,7 @@ class Bluetooth(private val context: Context) {
                 got(characteristic.value, status)
             }
         }
+        @Suppress("DEPRECATION") // its replacement is much newer than our minSdk
         val gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
             ?: throw IOException("Couldn't connect to GATT")
         try {
@@ -256,7 +260,7 @@ class Bluetooth(private val context: Context) {
         }
     }
 
-    /** The core writes through this, one call at a time, on its own thread. */
+    /** The core writes through this, one call at a time, on a thread where it may block. */
     private class Sink(private val socket: BluetoothSocket) : BluetoothSink {
         override fun send(data: ByteArray) {
             // An exception would reach the core as a panic, so close instead: the reader then ends the link.
@@ -268,7 +272,8 @@ class Bluetooth(private val context: Context) {
             }
         }
 
-        override fun close() {
+        // Also called after we tell the core the socket closed; closing again does nothing.
+        override fun closeSocket() {
             runCatching { socket.close() }
         }
     }
@@ -281,26 +286,3 @@ class Bluetooth(private val context: Context) {
         const val MAX_RETRY = 60_000L
     }
 }
-
-// The core's Bluetooth API, as the generated bindings will have it. Stand-ins until the core has it,
-// so Bluetooth stays off: delete them and import the ones from com.noobsbot.sharedclip.core.
-interface BluetoothSink {
-    fun send(data: ByteArray)
-    fun close()
-}
-
-interface BluetoothLink {
-    fun receive(data: ByteArray)
-    fun closed()
-}
-
-private fun Node.bluetoothWanted() = false
-
-@Suppress("UNUSED_PARAMETER")
-private fun Node.bluetoothOpen(sink: BluetoothSink, initiator: Boolean): BluetoothLink = throw IOException("No Bluetooth in the core yet")
-
-private fun bluetoothServiceUuid() = "556874fd-9b25-4150-bb6d-47e1ba6fe50c"
-
-private fun bluetoothPsmUuid() = "940c7880-bb22-4995-8a3f-f76155b49830"
-
-val Device.bluetooth get() = false
