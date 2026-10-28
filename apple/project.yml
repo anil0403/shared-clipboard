@@ -47,7 +47,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
         NSLocalNetworkUsageDescription: Shared Clipboard finds and connects to your other devices on this network.
-        NSBonjourServices: [_sharedclip._udp]
+        NSBonjourServices: [_sharedclip._udp, _sharedclipp2p._tcp]
     settings:
       base:
         PRODUCT_NAME: SharedClip
@@ -76,7 +76,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         NSLocalNetworkUsageDescription: Shared Clipboard finds and connects to your other devices on this network.
-        NSBonjourServices: [_sharedclip._udp]
+        NSBonjourServices: [_sharedclip._udp, _sharedclipp2p._tcp]
         NSCameraUsageDescription: Shared Clipboard scans the pairing code shown on your other device.
     entitlements:
       path: Support/iOS.entitlements
@@ -109,7 +109,7 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSLocalNetworkUsageDescription: Shared Clipboard finds and connects to your other devices on this network.
-        NSBonjourServices: [_sharedclip._udp]
+        NSBonjourServices: [_sharedclip._udp, _sharedclipp2p._tcp]
         NSExtension:
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"

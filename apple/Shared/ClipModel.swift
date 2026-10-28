@@ -36,6 +36,8 @@ final class ClipModel: ObservableObject {
     var writesClipboard = true
 
     private var bonjour: Bonjour?
+    /// The iPhone ↔ Mac backup path over peer-to-peer Wi-Fi, for when they aren't on the same network.
+    private var peerLink: PeerLink?
     private var starting: Task<Void, Never>?
 
     /// Starts the node. If it's running, looks for devices again: on iOS the connections may be gone after the app
@@ -54,6 +56,7 @@ final class ClipModel: ObservableObject {
 
     func stop() async {
         bonjour = nil
+        peerLink = nil
         await node?.stop()
         node = nil
     }
@@ -171,6 +174,7 @@ final class ClipModel: ObservableObject {
             devices = node.devices()
             history = node.history()
             browse(node)
+            peerLink = PeerLink(node: node)
         } catch {
             message = error.localizedDescription
         }
