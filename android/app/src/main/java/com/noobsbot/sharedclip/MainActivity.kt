@@ -3,13 +3,17 @@ package com.noobsbot.sharedclip
 import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -109,11 +113,17 @@ class MainActivity : ComponentActivity() {
 private fun App() {
     var pairing by rememberSaveable { mutableStateOf(false) }
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
-    LaunchedEffect(Unit) {
+    // Once the core has started, so we know if anything is paired. Asks again when the first device is paired.
+    val started = Shared.node != null
+    val paired = Shared.devices.isNotEmpty()
+    LaunchedEffect(started, paired) {
+        if (!started) return@LaunchedEffect
         // The camera permission is asked for by the QR scanner when it opens.
         val permissions = buildList {
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
             if (Build.VERSION.SDK_INT >= 37) add(Manifest.permission.ACCESS_LOCAL_NETWORK)
+            // Bluetooth reaches paired desktops without a shared network; the home screen says so when it's missing.
+            if (paired) addAll(bluetoothPermissions)
         }
         if (permissions.isNotEmpty()) ask.launch(permissions.toTypedArray())
     }
@@ -143,6 +153,7 @@ private fun HomeScreen(onPair: () -> Unit) {
         }
         Shared.error?.let { item { Text("Couldn't start: $it", color = MaterialTheme.colorScheme.error) } }
         item { BatteryTip() }
+        item { BluetoothStatus() }
         item { Header("Devices") { TextButton(onPair) { Text("Pair a device") } } }
         if (Shared.devices.isEmpty()) item { Text("No paired devices yet.") }
         items(Shared.devices, key = { it.id }) { DeviceRow(it) }
@@ -185,13 +196,48 @@ private fun BatteryTip() {
     }
 }
 
+/** Says why an offline desktop can't be reached over Bluetooth either. */
+@Composable
+private fun BluetoothStatus() {
+    val problem = Shared.bluetoothProblem ?: return
+    // Only the Linux app speaks Bluetooth so far.
+    val desktop = Shared.devices.firstOrNull { !it.online && it.platform == Platform.LINUX } ?: return
+    val context = LocalContext.current
+    val activity = LocalActivity.current
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        val text = when (problem) {
+            BluetoothProblem.OFF -> "Bluetooth is off, so ${desktop.name} can't be reached without a shared network."
+            BluetoothProblem.NOT_ALLOWED -> "Allow Nearby devices to reach ${desktop.name} over Bluetooth without a shared network."
+        }
+        Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+        if (problem == BluetoothProblem.NOT_ALLOWED) {
+            TextButton({
+                // After the second "Don't allow", Android stops asking: only Settings can change it.
+                if (activity?.shouldShowRequestPermissionRationale(bluetoothPermissions.first()) == true) {
+                    ask.launch(bluetoothPermissions)
+                } else {
+                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+                }
+            }) { Text("Allow") }
+        }
+    }
+}
+
 @Composable
 private fun DeviceRow(device: Device) {
     val context = LocalContext.current
     var confirm by remember { mutableStateOf(false) }
     ListItem(
         headlineContent = { Text(device.name) },
-        supportingContent = { Text("${device.platform.label()} · ${if (device.online) "online" else "offline"}") },
+        supportingContent = {
+            val status = when {
+                device.bluetooth -> "online over Bluetooth"
+                device.online -> "online"
+                else -> "offline"
+            }
+            Text("${device.platform.label()} · $status")
+        },
         trailingContent = { TextButton({ confirm = true }) { Text("Unpair") } },
     )
     if (confirm) {
