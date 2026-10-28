@@ -328,3 +328,19 @@ async fn wrong_secrets_are_rejected() {
     assert!(matches!(c.node.pair_link(link).await, Err(Error::PairingRejected)));
     assert!(!paired(&a, &c.id));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn paused_sends_and_takes_nothing() {
+    let (mut a, mut b, _da, _db) = two().await;
+    a.node.set_paused(true);
+    a.node.copy(text("not sent"), vec![]).await.unwrap();
+    b.node.copy(text("dropped"), vec![]).await.unwrap();
+    b.node.copy(png(3), vec![]).await.unwrap();
+    quiet(&mut b.clips).await;
+    quiet(&mut a.clips).await;
+    assert!(a.node.history().is_empty());
+
+    a.node.set_paused(false);
+    a.node.copy(text("sent"), vec![]).await.unwrap();
+    assert_eq!(next(&mut b.clips).await.formats, text("sent"));
+}
