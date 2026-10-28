@@ -23,6 +23,14 @@ Logs: `journalctl --user -u sharedclip`. Devices connect over UDP port 47820; op
   show a 6-digit code, and you accept on each if they match.
 - `sharedclip devices`, `unpair <id or name>`, `history`, `pause` and `resume` do what they say.
 
+## Bluetooth
+When a paired phone can't reach this computer over the network, it can still sync over Bluetooth LE: the service
+advertises itself and the phone connects to it. Text and small items (up to 1 MiB) go over Bluetooth; bigger ones
+and files wait for the network. For this:
+- the computer needs a Bluetooth adapter and BlueZ (`bluetoothd`), and Bluetooth must be turned on. The service
+  never turns it on; it waits, and starts as soon as you turn Bluetooth on;
+- the phone must be paired first, over the network (see Pair). There's no Bluetooth pairing.
+
 ## noobsbot-desktop
 noobsbot-desktop offers clipboard control only on its trusted socket (`$WAYLAND_DISPLAY-trusted`). The service
 connects there by itself when the socket exists; nothing else is needed. Run by hand, `sharedclip daemon` works as
