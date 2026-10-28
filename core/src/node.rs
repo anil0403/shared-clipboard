@@ -169,7 +169,8 @@ impl Inner {
         }
     }
 
-    /// Dials paired device `id` at the addresses we know, unless a dial is already running.
+    /// Dials paired device `id` at the addresses we know, unless a dial is already running. That one dials again
+    /// if it fails and the addresses changed meanwhile.
     pub fn connect(self: &Arc<Self>, id: &str) {
         let Ok(key) = id.parse::<PublicKey>() else { return };
         let addrs = {
@@ -183,11 +184,18 @@ impl Inner {
         let this = self.clone();
         let id = id.to_string();
         self.spawn(async move {
-            let addr = EndpointAddr::from_parts(key, addrs.into_iter().map(TransportAddr::Ip));
+            let addr = EndpointAddr::from_parts(key, addrs.iter().copied().map(TransportAddr::Ip));
             let conn = tokio::time::timeout(DIAL_TIMEOUT, this.ep.connect(addr, ALPN)).await;
-            this.lock().dialing.remove(&id);
-            if let Ok(Ok(conn)) = conn {
-                this.add_conn(conn, None);
+            // An address found while this dial ran wasn't tried (the dial was running): try it now.
+            let moved = {
+                let mut s = this.lock();
+                s.dialing.remove(&id);
+                !s.conns.contains_key(&id) && s.peers.get(&id).is_some_and(|p| parse_addrs(&p.addrs) != addrs)
+            };
+            match conn {
+                Ok(Ok(conn)) => this.add_conn(conn, None),
+                _ if moved => this.connect(&id),
+                _ => {}
             }
         });
     }

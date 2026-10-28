@@ -38,6 +38,10 @@ struct Dev {
 }
 
 async fn start(dir: &Path, name: &str) -> Dev {
+    start_on(dir, name, 0).await
+}
+
+async fn start_on(dir: &Path, name: &str, port: u16) -> Dev {
     let (clips_tx, clips) = unbounded_channel();
     let (offers_tx, offers) = unbounded_channel();
     let (devices_tx, devices) = unbounded_channel();
@@ -52,7 +56,7 @@ async fn start(dir: &Path, name: &str) -> Dev {
         data_dir: dir.to_string_lossy().into_owned(),
         name: name.into(),
         platform: Platform::Linux,
-        port: 0,
+        port,
     };
     let node = Node::start(config, Arc::new(events)).await.unwrap();
     Dev {
@@ -343,4 +347,34 @@ async fn paused_sends_and_takes_nothing() {
     a.node.set_paused(false);
     a.node.copy(text("sent"), vec![]).await.unwrap();
     assert_eq!(next(&mut b.clips).await.formats, text("sent"));
+}
+
+/// A port nothing listens on right now.
+fn free_port() -> u16 {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    socket.local_addr().unwrap().port()
+}
+
+/// Something else takes a node's old port and drops what arrives there, like a device that changed address.
+fn hold(port: u16) -> Vec<std::net::UdpSocket> {
+    ["0.0.0.0", "::"]
+        .into_iter()
+        .filter_map(|ip| std::net::UdpSocket::bind((ip, port)).ok())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn found_reconnects_after_restarts_on_new_ports() {
+    let (a, b, da, db) = two().await;
+    let old = [a.node.port(), b.node.port()];
+    a.node.stop().await;
+    b.node.stop().await;
+    drop((a, b));
+    let _held: Vec<_> = old.into_iter().flat_map(hold).collect();
+
+    // Both come back on new ports, so each one's own dial goes to the other's old port and gets nowhere.
+    let a = start_on(da.path(), "A", free_port()).await;
+    let b = start_on(db.path(), "B", free_port()).await;
+    b.node.found(a.id.clone(), format!("127.0.0.1:{}", a.node.port()));
+    wait_until(|| online(&a, &b.id) && online(&b, &a.id)).await;
 }
