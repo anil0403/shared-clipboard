@@ -64,6 +64,9 @@ object Shared {
     val offers = mutableStateListOf<Offer>()
     /** Why Bluetooth can't reach the desktops (set by Bluetooth.update()), or null. */
     var bluetoothProblem by mutableStateOf<BluetoothProblem?>(null)
+    /** A newer release (Updates.check), and how far its download is (0 to 1) once the user tapped Update. */
+    var update by mutableStateOf<Update?>(null)
+    var updating by mutableStateOf<Float?>(null)
 }
 
 data class Nearby(val id: String, val name: String)
@@ -129,10 +132,17 @@ class ClipService : Service() {
             listOf(
                 NotificationChannel(STATUS, "Connection status", NotificationManager.IMPORTANCE_LOW),
                 NotificationChannel(ALERTS, "Pairing and large items", NotificationManager.IMPORTANCE_HIGH),
+                NotificationChannel(Updates.CHANNEL, "Updates", NotificationManager.IMPORTANCE_DEFAULT),
             ),
         )
         foreground()
         bluetooth.start()
+        scope.launch {
+            while (true) {
+                Updates.check(this@ClipService)?.let { notifyUpdate(it) }
+                delay(12 * 60 * 60 * 1000L)
+            }
+        }
         Shared.paused = prefs.getBoolean("paused", false)
         // The core opens its sockets in start(), so they must already be on the Wi-Fi.
         @Suppress("DEPRECATION")
@@ -288,6 +298,24 @@ class ClipService : Service() {
                 .setContentTitle(offer.title())
                 .setContentText(Formatter.formatShortFileSize(this, offer.size.toLong()))
                 .addAction(action("Download", serviceIntent(FETCH, offer.id)))
+                .build(),
+        )
+    }
+
+    /** Once for each version; the home screen shows it too. */
+    private fun notifyUpdate(update: Update) {
+        if (prefs.getString("updateNotified", null) == update.version) return
+        prefs.edit { putString("updateNotified", update.version) }
+        val open = activity(Intent(this, MainActivity::class.java).setAction(MainActivity.UPDATE))
+        nm.notify(
+            Updates.NOTIFICATION,
+            Notification.Builder(this, Updates.CHANNEL)
+                .setSmallIcon(R.drawable.ic_clip)
+                .setContentTitle("Update available")
+                .setContentText("Shared Clipboard ${update.version} is ready to install.")
+                .setContentIntent(open)
+                .addAction(action("Update", open))
+                .setAutoCancel(true)
                 .build(),
         )
     }
@@ -465,9 +493,15 @@ class ClipService : Service() {
     }
 }
 
-/** Starts the service after a reboot. */
+/** Starts the service after a reboot, and after an update (Android stops the app to replace it). */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) context.service()
+        when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED -> context.service()
+            Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                context.getSystemService(NotificationManager::class.java).cancel(Updates.NOTIFICATION)
+                context.service()
+            }
+        }
     }
 }

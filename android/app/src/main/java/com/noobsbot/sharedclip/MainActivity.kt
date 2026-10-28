@@ -1,6 +1,7 @@
 package com.noobsbot.sharedclip
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -78,6 +79,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         service()
+        if (savedInstanceState == null) update(intent)
         setContent {
             val dark = isSystemInDarkTheme()
             val colors = when {
@@ -87,6 +89,18 @@ class MainActivity : ComponentActivity() {
             }
             MaterialTheme(colors) { Surface { App() } }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        update(intent)
+    }
+
+    /** The update notification opens us with UPDATE: install it. */
+    private fun update(intent: Intent) {
+        if (intent.action != UPDATE) return
+        getSystemService(NotificationManager::class.java).cancel(Updates.NOTIFICATION)
+        Shared.scope.launch { (Shared.update ?: Updates.check(this@MainActivity))?.let { Updates.install(this@MainActivity, it) } }
     }
 
     override fun onResume() {
@@ -107,6 +121,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun autoSend() = sendClipboard(auto = true)
+
+    companion object {
+        const val UPDATE = "com.noobsbot.sharedclip.UPDATE"
+    }
 }
 
 @Composable
@@ -152,6 +170,7 @@ private fun HomeScreen(onPair: () -> Unit) {
             }
         }
         Shared.error?.let { item { Text("Couldn't start: $it", color = MaterialTheme.colorScheme.error) } }
+        item { UpdateCard() }
         item { BatteryTip() }
         item { BluetoothStatus() }
         item { Header("Devices") { TextButton(onPair) { Text("Pair a device") } } }
@@ -170,6 +189,23 @@ private fun Header(title: String, action: @Composable () -> Unit = {}) {
     Row(Modifier.padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
         action()
+    }
+}
+
+/** A newer version on GitHub, with a button that installs it. */
+@Composable
+private fun UpdateCard() {
+    val update = Shared.update ?: return
+    val context = LocalContext.current
+    Card(Modifier.padding(vertical = 8.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Version ${update.version} is available", style = MaterialTheme.typography.titleMedium)
+            when (val progress = Shared.updating) {
+                null -> Button({ Shared.scope.launch { Updates.install(context, update) } }) { Text("Update") }
+                1f -> Text("Installing…")
+                else -> Text("Downloading… ${(progress * 100).toInt()}%")
+            }
+        }
     }
 }
 

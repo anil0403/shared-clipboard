@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Installs new releases from GitHub (Updates.kt). Android only accepts ones signed with our key. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Bluetooth reaches desktops when there's no shared network. Android 12 and newer only, never for location. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
@@ -94,8 +96,14 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- Hears from Android's installer how an update went. -->
+        <receiver
+            android:name=".UpdateReceiver"
+            android:exported="false" />
 
         <!-- The QR scanner follows the phone's rotation instead of staying in landscape. -->
         <activity
