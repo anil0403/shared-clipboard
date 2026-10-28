@@ -40,6 +40,8 @@ const MAX_ADDRS: usize = 8;
 const MAX_OFFERS: usize = 50;
 /// How many items given to the app we remember, so the app reporting them back doesn't send them again.
 const MAX_DELIVERED: usize = 8;
+/// Two connections made within this time of each other are a simultaneous dial; a later one is a reconnect.
+const SIMULTANEOUS: Duration = Duration::from_secs(3);
 
 // Why we closed a connection.
 const CLOSE_STOP: u32 = 0;
@@ -103,6 +105,8 @@ struct Conn {
     conn: Connection,
     /// Whether the device is on a metered network; `None` until its `hello` arrives.
     metered: Option<bool>,
+    /// When it was added.
+    since: Instant,
 }
 
 impl State {
@@ -261,14 +265,14 @@ impl Inner {
                 return;
             };
             let moved = addr.is_some_and(|a| remember(&mut peer.addrs, a));
-            // Two connections: keep the one opened by the lower id (or the newer, if one device opened both).
-            let old = s
-                .conns
-                .get(&id)
-                .map(|c| c.conn.clone())
-                .filter(|c| c.close_reason().is_none());
+            // Two connections: if both devices dialed at once, keep the one opened by the lower id. A later one is a
+            // reconnect, and the old one may be dead without knowing it yet (iOS takes a suspended app's sockets
+            // away): keep the newer.
+            let old = s.conns.get(&id).filter(|c| c.conn.close_reason().is_none());
+            let simultaneous = old.is_some_and(|c| c.since.elapsed() < SIMULTANEOUS);
+            let old = old.map(|c| c.conn.clone());
             match &old {
-                Some(old) if opener(old) < opener(&conn) => {
+                Some(old) if simultaneous && opener(old) < opener(&conn) => {
                     conn.close(VarInt::from_u32(CLOSE_DUPLICATE), b"duplicate");
                     (None, moved)
                 }
@@ -279,6 +283,7 @@ impl Inner {
                     let c = Conn {
                         conn: conn.clone(),
                         metered: None,
+                        since: Instant::now(),
                     };
                     s.conns.insert(id.clone(), c);
                     s.redial.remove(&id);

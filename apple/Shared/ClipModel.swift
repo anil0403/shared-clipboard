@@ -36,6 +36,8 @@ final class ClipModel: ObservableObject {
     var writesClipboard = true
 
     private var bonjour: Bonjour?
+    /// The iPhone ↔ Mac backup path over peer-to-peer Wi-Fi, for when they aren't on the same network.
+    private var peerLink: PeerLink?
     private var starting: Task<Void, Never>?
 
     /// Starts the node. If it's running, looks for devices again: on iOS the connections may be gone after the app
@@ -54,8 +56,16 @@ final class ClipModel: ObservableObject {
 
     func stop() async {
         bonjour = nil
+        peerLink = nil
         await node?.stop()
         node = nil
+    }
+
+    /// Starts a new node in place of the running one. iOS takes a suspended app's sockets away, and its node may not
+    /// notice: it shows devices offline, or online with dead connections.
+    func restart() async {
+        await stop()
+        await start()
     }
 
     /// Sends what was copied on this device to the paired devices.
@@ -70,6 +80,32 @@ final class ClipModel: ObservableObject {
     }
 
     #if os(iOS)
+    /// The app came to the front: sends what was copied here since we last looked, or else puts the newest item from
+    /// another device on the clipboard (a device sends its latest item when it connects, and it goes on the clipboard
+    /// if it's newer than ours). iOS doesn't say when something was copied, so if both changed, this device's copy
+    /// wins.
+    func open() async {
+        guard Clipboard.changedSinceSeen else { return await restart() }
+        // Read before connecting: the item a device sends on connect would replace it.
+        let item = await Clipboard.load(UIPasteboard.general.itemProviders)
+        Clipboard.markSeen()
+        if item.formats.isEmpty && item.files.isEmpty { return await restart() }
+        writesClipboard = false
+        await restart()
+        if await !isNewest(item) { await send(item.formats, item.files) }
+        writesClipboard = true
+    }
+
+    /// Whether `item` has the same text as the newest item: then it's no new copy, e.g. a received item was copied
+    /// again here.
+    private func isNewest(_ item: (formats: [Format], files: [File])) async -> Bool {
+        guard let node, let newest = node.history().first, let clip = try? await node.item(id: newest.id) else {
+            return false
+        }
+        let text = { (formats: [Format]) in formats.first { $0.mime.hasPrefix("text/plain") }?.data }
+        return text(item.formats) != nil && text(item.formats) == text(clip.formats)
+    }
+
     /// Sends pasted or shared items.
     func send(_ providers: [NSItemProvider]) async {
         let item = await Clipboard.load(providers)
@@ -138,6 +174,7 @@ final class ClipModel: ObservableObject {
             devices = node.devices()
             history = node.history()
             browse(node)
+            peerLink = PeerLink(node: node)
         } catch {
             message = error.localizedDescription
         }

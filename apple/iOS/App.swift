@@ -28,7 +28,7 @@ struct ContentView: View {
                 } footer: {
                     if let message = model.message { Text(message) }
                 }
-                Section("Devices") {
+                Section {
                     if model.devices.isEmpty {
                         Text("No paired devices yet. Tap Pair.")
                     }
@@ -39,6 +39,13 @@ struct ContentView: View {
                         let ids = rows.map { model.devices[$0].id }
                         Task { for id in ids { await model.unpair(id) } }
                     }
+                } header: {
+                    HStack {
+                        Text("Devices")
+                        Spacer()
+                        NavigationLink("Pair") { PairingView() }
+                            .textCase(nil)
+                    }
                 }
                 if !model.offers.isEmpty {
                     Section("Tap to download") {
@@ -48,20 +55,31 @@ struct ContentView: View {
                     }
                 }
                 Section("History (tap to copy)") {
-                    ForEach(model.history, id: \.id) { clip in
-                        Button(clip.summary) { Task { await model.copy(clip) } }
+                    // A long history scrolls inside its own panel, so the rest of the screen stays in reach.
+                    if model.history.count > Self.historyRows {
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(model.history, id: \.id) { clip in
+                                    historyRow(clip)
+                                    Divider()
+                                }
+                            }
+                        }
+                        .frame(height: CGFloat(Self.historyRows) * 44)
+                    } else {
+                        ForEach(model.history, id: \.id) { clip in
+                            Button(clip.summary) { Task { await model.copy(clip) } }
+                        }
                     }
                 }
                 Toggle("Pause", isOn: $model.paused)
             }
             .navigationTitle("Shared Clipboard")
-            .toolbar {
-                NavigationLink("Pair") { PairingView() }
-            }
         }
-        // iOS stops the app's connections in the background: reconnect whenever it comes back.
+        // iOS stops the app's connections in the background: start over whenever it comes back, and sync the
+        // clipboard both ways.
         .onChange(of: phase, initial: true) { _, now in
-            if now == .active { Task { await model.start() } }
+            if now == .active { Task { await model.open() } }
         }
         .alert("Compare codes", isPresented: $model.askingCode, presenting: model.pairingCode) { request in
             Button("Pair") { model.confirm(request, true) }
@@ -69,6 +87,21 @@ struct ContentView: View {
         } message: { request in
             Text("Pair only if \(request.device.name) shows the same code:\n\n\(request.code)")
         }
+    }
+
+    /// How many history items show before the history scrolls on its own.
+    private static let historyRows = 6
+
+    /// One line per item, so the panel's height fits a whole number of rows.
+    private func historyRow(_ clip: Summary) -> some View {
+        Button { Task { await model.copy(clip) } } label: {
+            Text(clip.summary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 43, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        // Without this, a list row with many buttons fires them all on one tap.
+        .buttonStyle(.borderless)
     }
 }
 

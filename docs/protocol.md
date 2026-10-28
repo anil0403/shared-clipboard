@@ -13,8 +13,9 @@ release version (see [VERSIONING.md](../VERSIONING.md#the-protocol-version-is-di
   - `sharedclip/pair/1`: pairing. Anyone may connect, but nothing happens without the link's secret or the code check.
 - The UDP port is 47820 if it's free (so firewalls can open one port), else any free port.
 - **One connection per pair of devices.** Either side may connect. If two connections between the same devices
-  exist, both sides keep the one opened by the device whose id (as text) sorts lower, and close the other. If the
-  same device opened both (a reconnect), the newer one is kept.
+  exist and the second came within 3 seconds of the first (both dialed at once), both sides keep the one opened by
+  the device whose id (as text) sorts lower, and close the other. Otherwise the second is a reconnect, and the newer
+  one is kept: the old one may be dead without either side knowing yet.
 
 ## Finding devices
 Every app publishes and browses the DNS-SD service `_sharedclip._udp` on the local network, with the node's port and
