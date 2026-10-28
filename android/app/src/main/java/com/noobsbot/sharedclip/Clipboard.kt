@@ -24,6 +24,7 @@ import androidx.core.content.FileProvider
 import androidx.core.content.IntentCompat
 import androidx.core.content.edit
 import com.noobsbot.sharedclip.core.Clip
+import com.noobsbot.sharedclip.core.Exception as CoreException
 import com.noobsbot.sharedclip.core.Format
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -173,8 +174,16 @@ fun Context.send(text: CharSequence?, html: String?, uris: List<Uri>) {
             parts.forEach { runCatching { it.input.close() } }
         }
         if (formats.isNotEmpty() || files.isNotEmpty()) app.call {
-            it.copy(formats, files)
-            Shared.historyVersion++
+            // ponytail: copy returns once the devices have it, so a slow device delays the history refresh (30 s at
+            // most). Refresh as soon as the core has it if that's ever noticed.
+            try {
+                it.copy(formats, files)
+            } catch (e: CoreException.Network) {
+                // Not a failure: the item is in the history and the sends go on.
+                Log.i("SharedClip", "Still sending: ${e.message}")
+            } finally {
+                Shared.historyVersion++
+            }
         }
     }
 }
