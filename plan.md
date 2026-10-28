@@ -94,10 +94,10 @@ so measure on real devices before setting size limits.
   - Bluetooth carries the item itself only when there's no network and the item is small.
   - Apple Continuity and Google's Nearby Connections work the same way.
 - **Encryption:** our own end-to-end encryption with the same device keys as iroh, not Bluetooth pairing. iOS apps
-  can't start Bluetooth bonding, and pairing works differently on each platform. Choose between Noise (as Bitchat
-  uses over Bluetooth) and TLS in Phase 0.
-- **Messages:** the same messages as on the network, as length-prefixed frames over the L2CAP channel. GATT is the
-  fallback.
+  can't start Bluetooth bonding, and pairing works differently on each platform. Decided: Noise XX (as Bitchat uses
+  over Bluetooth), with X25519 keys made from the device keys; see [docs/protocol.md](docs/protocol.md#bluetooth-le).
+- **Messages:** the same messages as on the network, as length-prefixed frames over the L2CAP channel. The desktop
+  publishes the channel's PSM in a GATT characteristic, as Apple does. GATT is the fallback.
 - **Not now:** iroh-ble-transport would let iroh run over Bluetooth directly. It's experimental, AGPL-licensed and
   runs at about 100 kbit/s. Revisit it later.
 - **Later, fast offline links:**

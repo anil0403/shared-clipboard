@@ -73,6 +73,44 @@ The only feature so far is `metered`: the device is on mobile data. A device sen
   doesn't send it again.
 - **Not sent:** password-manager items. The apps leave them out before they reach the core.
 
+## Bluetooth LE
+For paired devices that are near each other but can't reach each other over the network (e.g. a guest Wi-Fi, or a
+phone that isn't on the desktop's network). The desktop is the peripheral and the phone the central. There's no
+Bluetooth pairing or bonding: the device keys encrypt and authenticate the link.
+
+### Finding a desktop
+- The desktop advertises (connectable) the 128-bit service UUID `556874fd-9b25-4150-bb6d-47e1ba6fe50c`. Its GATT
+  service with that UUID has one read-only characteristic, `940c7880-bb22-4995-8a3f-f76155b49830`: the L2CAP PSM to
+  connect to, as 2 bytes little-endian. (Apple publishes channel numbers the same way.)
+- The desktop listens for L2CAP LE credit-based connections on that PSM, without Bluetooth security. The PSM is
+  dynamic: the first free one from `0x0085` up to `0xFF`.
+- The phone scans for the service UUID (low power) only while some paired device isn't connected over the network
+  (`Node::bluetooth_wanted`). On a result it connects over GATT, reads the PSM, closes GATT and opens the L2CAP
+  channel. It keeps one link per desktop; when that closes, it scans again, waiting 5 s, doubling up to 60 s.
+
+### The link
+The L2CAP channel is a reliable byte stream. On it:
+
+1. **Handshake:** `Noise_XX_25519_ChaChaPoly_BLAKE2s`, with empty payloads. The phone is the initiator. Each
+   device's static key is the X25519 form of its Ed25519 key: the secret is the first 32 bytes of SHA-512 of the
+   32-byte seed, clamped; the public key is the Ed25519 public key converted from Edwards to Montgomery form. Every
+   Noise message, in the handshake and after it, is `[u16, big-endian: length][message]`, at most 65535 bytes.
+2. **Trust:** each side looks for the paired device whose id, in Montgomery form, is the other side's static key. If
+   there's none (not paired, or removed), it closes the link. A newer link to the same device replaces an older one.
+3. **Messages:** the same as on `sharedclip/1`, one after another on one stream:
+   `[u32, big-endian: header length][header: JSON object][body]`. Only `clip` has a body (its formats' data, in
+   order), and its header gives the body's length. The stream is cut into Noise messages of at most 65519 bytes
+   before encryption (65535 minus the 16-byte tag); the nonces count up from 0 in each direction.
+4. **What goes over it:** only items for a device with no network connection. Items up to 1 MiB without files go as
+   a `clip`; anything else goes as an `offer`, fetched later over the network. A `request` over Bluetooth gets
+   `missing` unless the item is up to 1 MiB without files. A `clip` bigger than that, or with files, closes the
+   link.
+5. `hello`, catch-up, no echo and the history work as on the network. Catch-up goes over Bluetooth only if there's
+   no network connection. When the network connection comes back, new items go over it, and the Bluetooth link
+   stays open, unused.
+6. **Timeouts:** the handshake 15 s; a message 30 s plus 60 s per MiB. A side that sent nothing for 60 s sends its
+   `hello` again; a link that received nothing for 150 s is closed.
+
 ## Pairing (`sharedclip/pair/1`)
 One bidirectional stream. Each message is `[u32, big-endian: length][JSON object]`.
 
