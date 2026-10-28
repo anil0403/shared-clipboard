@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -28,6 +29,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Config
@@ -153,6 +155,9 @@ class ClipService : Service() {
                 return@launch
             }
             cm.registerNetworkCallback(wifiRequest, wifiCallback, Handler(mainLooper))
+            ContextCompat.registerReceiver(
+                this@ClipService, screenOn, IntentFilter(Intent.ACTION_SCREEN_ON), ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
             updateMetered()
             update()
         }
@@ -182,6 +187,7 @@ class ClipService : Service() {
         Shared.node?.let { node ->
             Shared.node = null
             cm.unregisterNetworkCallback(wifiCallback)
+            unregisterReceiver(screenOn)
             nsd.unregisterService(registration)
             stopDiscovery()
             cm.bindProcessToNetwork(null)
@@ -422,6 +428,11 @@ class ClipService : Service() {
             networkChange()
             updateMetered()
         }
+    }
+
+    /** The connection timers stop while the phone sleeps, so after a sleep away from home they'd still say online. */
+    private val screenOn = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = networkChange()
     }
 
     /** Tells the core, so it checks its connections and dials the offline devices now. */
