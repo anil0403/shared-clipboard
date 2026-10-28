@@ -14,3 +14,5 @@ wl-clipboard-rs = "0.9.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
 mdns-sd = { version = "0.21", default-features = false }
 qrcode = { version = "0.14", default-features = false }
+bluer = { version = "0.17.4", features = ["bluetoothd", "l2cap"] }
+futures-util = { version = "0.3", default-features = false }

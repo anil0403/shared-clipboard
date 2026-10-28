@@ -1,6 +1,7 @@
 //! Shared Clipboard for Linux (Wayland): `sharedclip daemon` is the background service; the other commands talk to
 //! it over its control socket.
 
+mod bluetooth;
 mod clip;
 mod daemon;
 

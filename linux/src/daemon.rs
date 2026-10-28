@@ -219,6 +219,7 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
     });
 
     let mdns = discovery(&app, &name).map_err(|e| format!("mDNS: {e}"))?;
+    let bluetooth = tokio::spawn(crate::bluetooth::run(node.clone()));
 
     let a = app.clone();
     tokio::spawn(async move {
@@ -247,7 +248,9 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
         _ = tokio::signal::ctrl_c() => Ok(()),
         Ok(err) = &mut watch_failed => Err(format!("clipboard: {err}")),
     };
-    // Say goodbye on mDNS, so other devices drop this one now.
+    // Stop advertising over Bluetooth (BlueZ is told while the node stops) and say goodbye on mDNS, so other
+    // devices drop this one now.
+    bluetooth.abort();
     let goodbye = mdns.shutdown();
     node.stop().await;
     let _ = std::fs::remove_file(&sock);
