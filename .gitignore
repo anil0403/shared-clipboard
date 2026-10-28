@@ -3,6 +3,3 @@
 
 # Rust build output
 /target/
-
-# Agent worktrees
-/.claude/worktrees/

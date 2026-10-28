@@ -7,10 +7,10 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", ".trail/**", ".claude/**", "LICENSE"]
+    paths-ignore: ["**.md", "docs/**", ".trail/**", "LICENSE"]
   pull_request:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", ".trail/**", ".claude/**", "LICENSE"]
+    paths-ignore: ["**.md", "docs/**", ".trail/**", "LICENSE"]
   workflow_dispatch:
 
 permissions:
