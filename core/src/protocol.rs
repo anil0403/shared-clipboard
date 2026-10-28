@@ -1,7 +1,8 @@
 //! The wire format from `docs/protocol.md`: messages, framing and item ids.
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::Connection;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{Error, Platform};
 
@@ -139,14 +140,14 @@ pub fn net(e: impl std::fmt::Display) -> Error {
 }
 
 /// Writes `[u32 big-endian length][JSON]`.
-pub async fn write_frame(send: &mut SendStream, msg: &impl Serialize) -> Result<(), Error> {
+pub async fn write_frame(send: &mut (impl AsyncWrite + Unpin), msg: &impl Serialize) -> Result<(), Error> {
     let json = serde_json::to_vec(msg).map_err(net)?;
     send.write_all(&(json.len() as u32).to_be_bytes()).await.map_err(net)?;
     send.write_all(&json).await.map_err(net)
 }
 
 /// Reads `[u32 big-endian length][JSON]`, refusing anything longer than `max`.
-pub async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream, max: usize) -> Result<T, Error> {
+pub async fn read_frame<T: DeserializeOwned>(recv: &mut (impl AsyncRead + Unpin), max: usize) -> Result<T, Error> {
     let mut len = [0; 4];
     recv.read_exact(&mut len).await.map_err(net)?;
     let len = u32::from_be_bytes(len) as usize;

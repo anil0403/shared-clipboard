@@ -15,7 +15,7 @@ use iroh::{
     },
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::oneshot,
     time::Instant,
 };
@@ -443,7 +443,7 @@ impl Inner {
         }
     }
 
-    async fn on_clip(self: &Arc<Self>, from: &str, recv: RecvStream, m: ClipMsg) -> Result<(), Error> {
+    async fn on_clip(self: &Arc<Self>, from: &str, recv: impl AsyncRead + Unpin, m: ClipMsg) -> Result<(), Error> {
         let id = m.id.clone();
         let res = self.receive_clip(from, recv, m).await;
         if res.is_err() {
@@ -453,7 +453,12 @@ impl Inner {
         res
     }
 
-    async fn receive_clip(self: &Arc<Self>, from: &str, mut recv: RecvStream, m: ClipMsg) -> Result<(), Error> {
+    async fn receive_clip(
+        self: &Arc<Self>,
+        from: &str,
+        mut recv: impl AsyncRead + Unpin,
+        m: ClipMsg,
+    ) -> Result<(), Error> {
         if !valid_id(&m.id) {
             return Err(net("bad item id"));
         }
@@ -961,8 +966,18 @@ async fn send_item(conn: &Connection, dir: &Path, meta: &Meta, metered: bool, la
     send_msg(conn, &Msg::Offer(offer)).await
 }
 
-/// Sends an item, streaming its formats from `history/<id>` and its files from their paths.
+/// Sends an item on its own stream.
 async fn send_clip(conn: &Connection, dir: &Path, meta: &Meta, latest: bool) -> Result<(), Error> {
+    let mut send = conn.open_uni().await.map_err(net)?;
+    write_clip(&mut send, dir, meta, latest).await?;
+    send.finish().map_err(net)?;
+    // Done when the device has it all (or turned it down).
+    send.stopped().await.map_err(net)?;
+    Ok(())
+}
+
+/// Writes an item's header and body, streaming its formats from `history/<id>` and its files from their paths.
+async fn write_clip(send: &mut (impl AsyncWrite + Unpin), dir: &Path, meta: &Meta, latest: bool) -> Result<(), Error> {
     let header = ClipMsg {
         id: meta.id.clone(),
         time_ms: meta.time_ms,
@@ -977,19 +992,15 @@ async fn send_clip(conn: &Connection, dir: &Path, meta: &Meta, latest: bool) -> 
             .collect(),
         latest,
     };
-    let mut send = conn.open_uni().await.map_err(net)?;
-    write_frame(&mut send, &Msg::Clip(header)).await?;
+    write_frame(send, &Msg::Clip(header)).await?;
     let blob = (store::blob_path(dir, &meta.id), meta.formats_size());
     let files = meta.files.iter().map(|f| (PathBuf::from(&f.path), f.size));
     for (path, size) in std::iter::once(blob).chain(files) {
         let file = tokio::fs::File::open(&path).await.map_err(io)?;
-        if tokio::io::copy(&mut file.take(size), &mut send).await.map_err(io)? != size {
+        if tokio::io::copy(&mut file.take(size), send).await.map_err(io)? != size {
             return Err(io("a file changed while sending"));
         }
     }
-    send.finish().map_err(net)?;
-    // Done when the device has it all (or turned it down).
-    send.stopped().await.map_err(net)?;
     Ok(())
 }
 
@@ -1001,7 +1012,7 @@ fn transfer_limit(size: u64) -> Duration {
 
 /// Saves an item's formats to `path` as they arrive, adding them to the item id. Returns the start of its plain text.
 async fn receive_formats(
-    recv: &mut RecvStream,
+    recv: &mut (impl AsyncRead + Unpin),
     h: &mut blake3::Hasher,
     path: &Path,
     parts: &[FormatPart],
@@ -1023,7 +1034,7 @@ async fn receive_formats(
 /// Copies one format or file of `len` bytes from the stream to `out`, adding it to the item id. Its first
 /// `PREVIEW_BYTES` also go to `head`.
 async fn receive_part(
-    recv: &mut RecvStream,
+    recv: &mut (impl AsyncRead + Unpin),
     h: &mut blake3::Hasher,
     name: &str,
     len: u64,
@@ -1050,7 +1061,7 @@ async fn receive_part(
 /// Saves an item's files to `tmp` as they arrive, adding them to the item id. Their paths are in `dir`, where the
 /// caller moves them.
 async fn receive_files(
-    recv: &mut RecvStream,
+    recv: &mut (impl AsyncRead + Unpin),
     h: &mut blake3::Hasher,
     tmp: &Path,
     dir: &Path,
