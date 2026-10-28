@@ -165,8 +165,9 @@ first and follow it. Also:
 
 ## How it is set up
 
-[`.github/workflows/version.yml`](.github/workflows/version.yml) runs **on every push to main**, **once a day at
-00:00 UTC** and **by hand** (Actions ▸ Version ▸ Run workflow, with `bump`: `auto`, `major`, `minor` or `patch`):
+[`.github/workflows/version.yml`](.github/workflows/version.yml) runs **after CI passes on a push to main**,
+**once a day at 00:00 UTC** and **by hand** (Actions ▸ Version ▸ Run workflow, with `bump`: `auto`, `major`, `minor`
+or `patch`):
 
 1. `last` = the newest tag that is not a beta (`git describe --tags --abbrev=0 --exclude '*-*'`).
 2. Read the commit **subjects** since `last` (bodies can quote other commits). `docs:`, `ci:` and `test:` commits,
