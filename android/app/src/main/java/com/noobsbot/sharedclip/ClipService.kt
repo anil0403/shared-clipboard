@@ -40,6 +40,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -66,11 +67,16 @@ fun Context.service(action: String? = null, id: String? = null) {
     startForegroundService(Intent(this, ClipService::class.java).setAction(action).putExtra("id", id))
 }
 
-/** Runs a core call, showing what went wrong as a toast. */
+/** Runs a core call, showing what went wrong as a toast. Starts the core first if it isn't running. */
 fun Context.call(block: suspend (Node) -> Unit) {
-    val node = Shared.node ?: return toast("Shared Clipboard is still starting").also { service() }
+    if (Shared.node == null) service()
     Shared.scope.launch {
         try {
+            // ponytail: polls, because snapshotFlow only hears of changes once a Compose screen has been shown.
+            val node = withTimeoutOrNull(30_000) {
+                while (Shared.node == null) delay(100)
+                Shared.node
+            } ?: return@launch toast(Shared.error?.let { "Couldn't start: $it" } ?: "Shared Clipboard didn't start")
             block(node)
         } catch (e: Exception) {
             toast(e.message ?: e.toString())
