@@ -4,12 +4,14 @@
 #   "feat:"                → a release now: 1.5.0
 #   anything else          → a beta now: 1.4.3-beta.N, released as 1.4.3 by the nightly run
 #   docs:, ci:, test:, and commits that change only docs and CI files → nothing
-# Nothing is made while the last CI run on main failed. The first release, 1.0.0, is made by hand: Run workflow with
-# bump major.
+# It runs after CI passes on a push to main, so a version is only made from a commit that passed. The first release,
+# 1.0.0, is made by hand: Run workflow with bump major.
 name: Version
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   schedule:
     - cron: "0 0 * * *"
@@ -32,12 +34,16 @@ concurrency:
 
 jobs:
   version:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          # The commit CI passed, not a newer one that it hasn't checked yet.
+          ref: ${{ github.event.workflow_run.head_sha || 'main' }}
           fetch-depth: 0
       - run: .github/version.sh
         env:

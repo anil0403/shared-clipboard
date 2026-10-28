@@ -2,11 +2,13 @@
 # Makes the next version from the commits since the last release, as VERSIONING.md ("How it is set up") says: tags it,
 # pushes it, makes its draft GitHub release and starts release.yml for it.
 # version.yml runs it at the top of a full clone of main, with BUMP (auto, major, minor or patch) and
-# GITHUB_EVENT_NAME (push, schedule or workflow_dispatch) set and gh logged in. To try it, run it in a scratch clone
-# with a fake gh on PATH: it pushes to origin.
+# GITHUB_EVENT_NAME (workflow_run after CI passed on a push, schedule or workflow_dispatch) set and gh logged in.
+# To try it, run it in a scratch clone with a fake gh on PATH: it pushes to origin.
 set -euo pipefail
 bump=${BUMP:-auto}
 event=${GITHUB_EVENT_NAME:?}
+# A run after CI passed on a push counts as that push.
+[[ $event == workflow_run ]] && event=push
 # Files that change nothing in the apps.
 docs='\.md$|^docs/|^\.github/|^\.trail/|^\.claude/|^LICENSE$'
 
