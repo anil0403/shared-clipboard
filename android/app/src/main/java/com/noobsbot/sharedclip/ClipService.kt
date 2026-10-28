@@ -24,6 +24,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -57,9 +58,17 @@ object Shared {
     var paused by mutableStateOf(false)
     /** Goes up when the history changes. */
     var historyVersion by mutableIntStateOf(0)
+    /** Items too big to send right away (Events.onOffer), newest first, until downloaded. */
+    val offers = mutableStateListOf<Offer>()
 }
 
 data class Nearby(val id: String, val name: String)
+
+/** "photo.jpg from Laptop" */
+fun Offer.title(): String {
+    val from = Shared.devices.find { it.id == this.from }?.name ?: "another device"
+    return "${fileNames.joinToString().ifEmpty { mimes.firstOrNull() ?: "An item" }} from $from"
+}
 
 /** Starts the service, or hands it an action. */
 fun Context.service(action: String? = null, id: String? = null) {
@@ -148,6 +157,7 @@ class ClipService : Service() {
                 nm.cancel(id.hashCode())
                 call {
                     writeClip(it.fetch(id))
+                    Shared.offers.removeAll { offer -> offer.id == id }
                     Shared.historyVersion++
                 }
             }
@@ -181,7 +191,11 @@ class ClipService : Service() {
         }
 
         override fun onOffer(offer: Offer) {
-            Shared.scope.launch { notifyOffer(offer) }
+            Shared.scope.launch {
+                Shared.offers.removeAll { it.id == offer.id }
+                Shared.offers.add(0, offer)
+                notifyOffer(offer)
+            }
         }
 
         override fun onDevices(devices: List<Device>) {
@@ -238,14 +252,13 @@ class ClipService : Service() {
             .build()
     }
 
+    // The home screen lists offers too, in case notifications are off.
     private fun notifyOffer(offer: Offer) {
-        val from = Shared.devices.find { it.id == offer.from }?.name ?: "another device"
-        val what = offer.fileNames.joinToString().ifEmpty { offer.mimes.firstOrNull() ?: "An item" }
         nm.notify(
             offer.id.hashCode(),
             Notification.Builder(this, ALERTS)
                 .setSmallIcon(R.drawable.ic_clip)
-                .setContentTitle("$what from $from")
+                .setContentTitle(offer.title())
                 .setContentText(Formatter.formatShortFileSize(this, offer.size.toLong()))
                 .addAction(action("Download", serviceIntent(FETCH, offer.id)))
                 .build(),

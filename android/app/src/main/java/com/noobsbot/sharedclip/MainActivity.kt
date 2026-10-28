@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.text.format.Formatter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -62,6 +63,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Device
+import com.noobsbot.sharedclip.core.Offer
 import com.noobsbot.sharedclip.core.Platform
 import kotlinx.coroutines.launch
 
@@ -145,6 +147,8 @@ private fun HomeScreen(onPair: () -> Unit) {
         item { Header("Devices") { TextButton(onPair) { Text("Pair a device") } } }
         if (Shared.devices.isEmpty()) item { Text("No paired devices yet.") }
         items(Shared.devices, key = { it.id }) { DeviceRow(it) }
+        if (Shared.offers.isNotEmpty()) item { Header("Ready to download") }
+        items(Shared.offers, key = { it.id }) { OfferRow(it) }
         item { Header("History") }
         if (history.isEmpty()) item { Text("Nothing copied yet.") }
         items(history) { HistoryRow(it) }
@@ -205,6 +209,16 @@ private fun DeviceRow(device: Device) {
             dismissButton = { TextButton({ confirm = false }) { Text("Cancel") } },
         )
     }
+}
+
+@Composable
+private fun OfferRow(offer: Offer) {
+    val context = LocalContext.current
+    ListItem(
+        headlineContent = { Text(offer.title(), maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(Formatter.formatShortFileSize(context, offer.size.toLong())) },
+        trailingContent = { TextButton({ context.service(ClipService.FETCH, offer.id) }) { Text("Download") } },
+    )
 }
 
 @Composable
