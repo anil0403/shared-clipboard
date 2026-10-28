@@ -354,4 +354,89 @@ mod tests {
             [fmt("text/plain", "hi"), fmt("text/html", "<b>hi</b>")]
         );
     }
+
+    /// Against a real compositor, with wl-clipboard installed: `cargo test -p sharedclip-linux -- --ignored`.
+    /// wl-copy and wl-paste run on the normal socket, as apps do.
+    #[test]
+    #[ignore = "needs a Wayland compositor with data-control"]
+    fn live() {
+        use std::process::{Command, Stdio};
+        let normal = env::var("WAYLAND_DISPLAY").expect("WAYLAND_DISPLAY");
+        let paste = |args: &[&str]| {
+            let out = Command::new("wl-paste")
+                .arg("-n")
+                .args(args)
+                .env("WAYLAND_DISPLAY", &normal)
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        // wl-copy forks to serve pastes, so it mustn't hold our pipes.
+        let wl_copy = |args: &[&str]| {
+            let mut cmd = Command::new("wl-copy");
+            cmd.args(args)
+                .env("WAYLAND_DISPLAY", &normal)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            cmd
+        };
+        use_trusted_socket();
+        eprintln!("watching on {:?}", env::var("WAYLAND_DISPLAY").unwrap());
+        let (tx, rx) = mpsc::channel();
+        let w = watcher().expect("data-control");
+        std::thread::spawn(move || watch(w, move |formats, files| tx.send((formats, files)).unwrap()));
+        let next = || rx.recv_timeout(Duration::from_secs(3));
+
+        // An app's copy is seen.
+        wl_copy(&["copied in an app"]).status().unwrap();
+        assert_eq!(next().unwrap(), (vec![fmt("text/plain", "copied in an app")], vec![]));
+
+        // When the app quits, the compositor may offer its kept copy again: not sent twice.
+        let mut app = wl_copy(&["--foreground", "kept"]).spawn().unwrap();
+        assert_eq!(next().unwrap().0, [fmt("text/plain", "kept")]);
+        app.kill().unwrap();
+        app.wait().unwrap();
+        assert!(next().is_err(), "the compositor's kept copy isn't sent again");
+        eprintln!("after the app quit, the clipboard holds {:?}", paste(&[]));
+
+        // What we set is pasted in every format, and not sent back.
+        let html = fmt("text/html", "<b>from a phone</b>");
+        set(&[fmt("text/plain", "from a phone"), html], &[]).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(paste(&[]), "from a phone");
+        assert_eq!(paste(&["-t", "UTF8_STRING"]), "from a phone");
+        assert_eq!(paste(&["-t", "text/html"]), "<b>from a phone</b>");
+
+        let path = env::temp_dir().join(format!("sharedclip live {}.txt", std::process::id()));
+        std::fs::write(&path, "file body").unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        let file = File {
+            name: "x".into(),
+            path: path.clone(),
+            size: 9,
+        };
+        set(&[], std::slice::from_ref(&file)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let uri = &uris(&[file])[0];
+        assert_eq!(paste(&["-t", "text/uri-list"]), format!("{uri}\r\n"));
+        assert_eq!(paste(&["-t", "x-special/gnome-copied-files"]), format!("copy\n{uri}"));
+
+        // A password manager's item is never sent.
+        let mut secret = Options::new();
+        secret.sensitive(true);
+        secret
+            .copy(Source::Bytes(b"hunter2"[..].into()), MimeType::Text)
+            .unwrap();
+        assert!(next().is_err(), "our own items and passwords aren't sent");
+
+        // Files copied in a file manager are.
+        let list = format!("{uri}\r\n");
+        wl_copy(&["-t", "text/uri-list", &list]).status().unwrap();
+        let (formats, files) = next().unwrap();
+        assert_eq!(
+            (formats, files[0].path.as_str(), files[0].size),
+            (vec![], path.as_str(), 9)
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
 }
