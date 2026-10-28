@@ -167,6 +167,28 @@ async fn link_pairing_then_items_arrive() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn history_lists_summaries_and_item_reads_the_data() {
+    let (a, mut b, _da, db) = two().await;
+    let long = "line one\n".repeat(100);
+    a.node.copy(text(&long), vec![]).await.unwrap();
+    let clip = next(&mut b.clips).await;
+    let item = b.node.history().remove(0);
+    assert_eq!(item.text.as_deref(), Some(&long[..300]));
+    assert_eq!(
+        (item.size, item.mimes),
+        (900, vec!["text/plain;charset=utf-8".to_string()])
+    );
+    assert_eq!(b.node.item(clip.id.clone()).await.unwrap(), clip);
+
+    // After a restart it's read from disk.
+    b.node.stop().await;
+    drop(b);
+    let b = start(db.path(), "B").await;
+    assert_eq!(b.node.item(clip.id.clone()).await.unwrap().formats, clip.formats);
+    assert!(matches!(b.node.item("00".repeat(32)).await, Err(Error::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn files_with_clashing_names_all_arrive() {
     let (a, mut b, _da, _db) = two().await;
     let src = tempdir().unwrap();

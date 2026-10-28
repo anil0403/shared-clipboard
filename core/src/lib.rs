@@ -55,7 +55,7 @@ pub struct Format {
 }
 
 /// A copied file. On copy, `path` is where it is; on receive, where the core saved it (inside `data_dir`).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct File {
     pub name: String,
     pub path: String,
@@ -71,6 +71,21 @@ pub struct Clip {
     /// When it was copied, in milliseconds since 1970, by the sender's clock.
     pub time_ms: u64,
     pub formats: Vec<Format>,
+    pub files: Vec<File>,
+}
+
+/// A history item without its data; `Node::item` gets the whole item.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Summary {
+    pub id: String,
+    pub from: String,
+    pub time_ms: u64,
+    /// Its formats' MIME types.
+    pub mimes: Vec<String>,
+    /// Total size in bytes, formats and files.
+    pub size: u64,
+    /// The first 300 characters of its `text/plain` format, if it has one.
+    pub text: Option<String>,
     pub files: Vec<File>,
 }
 
@@ -162,9 +177,14 @@ impl Node {
         self.inner.fetch(&id).await
     }
 
-    /// The last 50 items, newest first.
-    pub fn history(&self) -> Vec<Clip> {
-        self.inner.lock().history.clone()
+    /// The last 50 items, newest first, without their data.
+    pub fn history(&self) -> Vec<Summary> {
+        self.inner.lock().history.iter().map(|m| m.summary()).collect()
+    }
+
+    /// A whole history item, read from disk: e.g. to put an old item back on the clipboard.
+    pub async fn item(&self, id: String) -> Result<Clip, Error> {
+        self.inner.item(&id).await
     }
 
     /// The paired devices.

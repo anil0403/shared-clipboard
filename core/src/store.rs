@@ -1,13 +1,20 @@
 //! What the core keeps in `data_dir`: the key, paired devices, history and received files.
 
-use std::{collections::HashSet, fs, io::Write, path::Path};
+use std::{
+    collections::HashSet,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use crate::{
-    Clip, Error, File, Format,
-    protocol::{FormatPart, PeerInfo, valid_id},
+    Clip, Error, File, Format, Summary,
+    protocol::{FormatPart, MAX_FILE_NAME, PeerInfo, clean, valid_id},
 };
 
 /// How many items the history keeps.
@@ -55,105 +62,140 @@ pub fn save_peers(dir: &Path, peers: &[PeerInfo], removed: &HashSet<String>) {
     write_json(&dir.join("removed.json"), removed);
 }
 
-/// A history item in `history.json`; its formats' data is in `history/<id>`, one after another.
-#[derive(Serialize, Deserialize)]
-struct Stored {
-    id: String,
-    from: String,
-    time_ms: u64,
-    formats: Vec<FormatPart>,
-    files: Vec<StoredFile>,
+/// A history item without its data, as `history.json` lists it. Its formats' data is in `history/<id>`, one after
+/// another; its files are at their paths.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Meta {
+    pub id: String,
+    pub from: String,
+    pub time_ms: u64,
+    pub formats: Vec<FormatPart>,
+    /// With the names as sent, which the item id covers.
+    pub files: Vec<File>,
+    /// The start of its plain text, for the history list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct StoredFile {
-    name: String,
-    path: String,
-    size: u64,
+impl Meta {
+    /// Total size of its formats and files.
+    pub fn size(&self) -> u64 {
+        let sizes = self
+            .formats
+            .iter()
+            .map(|f| f.size)
+            .chain(self.files.iter().map(|f| f.size));
+        sizes.fold(0, u64::saturating_add)
+    }
+
+    /// Size of its formats' data in `history/<id>`.
+    pub fn formats_size(&self) -> u64 {
+        self.formats.iter().map(|f| f.size).fold(0, u64::saturating_add)
+    }
+
+    /// Text only: goes right away even to a metered device.
+    pub fn is_text(&self) -> bool {
+        self.files.is_empty() && self.formats.iter().all(|f| f.mime.starts_with("text/"))
+    }
+
+    pub fn summary(&self) -> Summary {
+        Summary {
+            id: self.id.clone(),
+            from: self.from.clone(),
+            time_ms: self.time_ms,
+            mimes: self.formats.iter().map(|f| f.mime.clone()).collect(),
+            size: self.size(),
+            text: self.text.clone(),
+            files: self.app_files(),
+        }
+    }
+
+    /// Its files for the app, with names safe to show.
+    pub fn app_files(&self) -> Vec<File> {
+        let file = |f: &File| File {
+            name: clean(&f.name, MAX_FILE_NAME),
+            path: f.path.clone(),
+            size: f.size,
+        };
+        self.files.iter().map(file).collect()
+    }
 }
 
-pub fn load_history(dir: &Path) -> Vec<Clip> {
-    let list: Vec<Stored> = read_json(&dir.join("history.json"));
+/// How much of a text format we keep for `Meta::text`, in characters, and the bytes that always hold that many.
+const PREVIEW_CHARS: usize = 300;
+pub const PREVIEW_BYTES: usize = 4 * PREVIEW_CHARS + 3;
+
+/// `Meta::text` from the first bytes of a `text/plain` format.
+pub fn preview(head: &[u8]) -> String {
+    String::from_utf8_lossy(head).chars().take(PREVIEW_CHARS).collect()
+}
+
+/// The history, newest first. Items whose data is missing are left out.
+pub fn load_history(dir: &Path) -> Vec<Meta> {
+    let list: Vec<Meta> = read_json(&dir.join("history.json"));
+    let saved = |m: &Meta| fs::metadata(blob_path(dir, &m.id)).is_ok_and(|f| f.len() == m.formats_size());
     list.into_iter()
-        .filter_map(|s| {
-            if !valid_id(&s.id) {
-                return None;
-            }
-            let blob = fs::read(dir.join("history").join(&s.id)).ok()?;
-            let mut rest = blob.as_slice();
-            let mut formats = Vec::new();
-            for f in s.formats {
-                let data = rest.split_off(..usize::try_from(f.size).ok()?)?;
-                formats.push(Format {
-                    mime: f.mime,
-                    data: data.to_vec(),
-                });
-            }
-            let files = s
-                .files
-                .into_iter()
-                .map(|f| File {
-                    name: f.name,
-                    path: f.path,
-                    size: f.size,
-                })
-                .collect();
-            Some(Clip {
-                id: s.id,
-                from: s.from,
-                time_ms: s.time_ms,
-                formats,
-                files,
-            })
-        })
+        .filter(|m| valid_id(&m.id) && saved(m))
         .take(HISTORY_LEN)
         .collect()
 }
 
-/// Saves the history list. The items' data must already be saved with `save_blob`.
-pub fn save_history(dir: &Path, history: &[Clip]) {
-    let list: Vec<Stored> = history
-        .iter()
-        .map(|c| Stored {
-            id: c.id.clone(),
-            from: c.from.clone(),
-            time_ms: c.time_ms,
-            formats: c
-                .formats
-                .iter()
-                .map(|f| FormatPart {
-                    mime: f.mime.clone(),
-                    size: f.data.len() as u64,
-                })
-                .collect(),
-            files: c
-                .files
-                .iter()
-                .map(|f| StoredFile {
-                    name: f.name.clone(),
-                    path: f.path.clone(),
-                    size: f.size,
-                })
-                .collect(),
-        })
-        .collect();
-    write_json(&dir.join("history.json"), &list);
+pub fn save_history(dir: &Path, history: &[Meta]) {
+    write_json(&dir.join("history.json"), &history);
 }
 
-/// Saves an item's formats to `history/<id>`.
-pub async fn save_blob(dir: &Path, clip: &Clip) -> Result<(), Error> {
-    let blob = clip
-        .formats
-        .iter()
-        .map(|f| f.data.as_slice())
-        .collect::<Vec<_>>()
-        .concat();
+/// Where an item's formats' data is. `id` must be valid.
+pub fn blob_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join("history").join(id)
+}
+
+/// A new file to receive an item's formats into, in the folder of `blob_path`.
+pub async fn blob_part(dir: &Path, id: &str) -> Result<PathBuf, Error> {
     let dir = dir.join("history");
     tokio::fs::create_dir_all(&dir).await.map_err(io)?;
-    tokio::fs::write(dir.join(&clip.id), blob).await.map_err(io)
+    Ok(dir.join(format!("{id}.{:x}.part", rand::random::<u64>())))
 }
 
-/// Deletes an item that dropped out of the history: its data and any files we received for it.
+/// Saves an item's formats to `history/<id>`, through a part file, so a send reading the old copy isn't cut short.
+pub async fn save_blob(dir: &Path, id: &str, formats: &[Format]) -> Result<(), Error> {
+    let part = blob_part(dir, id).await?;
+    let write = async {
+        let mut out = tokio::fs::File::create(&part).await?;
+        for f in formats {
+            out.write_all(&f.data).await?;
+        }
+        out.flush().await?;
+        tokio::fs::rename(&part, blob_path(dir, id)).await
+    };
+    let res = write.await.map_err(io);
+    if res.is_err() {
+        let _ = tokio::fs::remove_file(&part).await;
+    }
+    res
+}
+
+/// Reads a whole item back from disk.
+pub async fn load_item(dir: &Path, meta: &Meta) -> Result<Clip, Error> {
+    let mut blob = tokio::fs::File::open(blob_path(dir, &meta.id)).await.map_err(io)?;
+    let mut formats = Vec::new();
+    for f in &meta.formats {
+        let mut data = vec![0; usize::try_from(f.size).map_err(io)?];
+        blob.read_exact(&mut data).await.map_err(io)?;
+        formats.push(Format {
+            mime: f.mime.clone(),
+            data,
+        });
+    }
+    Ok(Clip {
+        id: meta.id.clone(),
+        from: meta.from.clone(),
+        time_ms: meta.time_ms,
+        formats,
+        files: meta.app_files(),
+    })
+}
+
+/// Deletes an item that dropped out of the history: its data and any files we received for it. Can take a while.
 pub fn forget(dir: &Path, id: &str) {
     let _ = fs::remove_file(dir.join("history").join(id));
     let _ = fs::remove_dir_all(dir.join("files").join(id));

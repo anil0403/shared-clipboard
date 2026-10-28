@@ -22,9 +22,9 @@ use crate::{
     pairing::{self, Link},
     protocol::{
         ALPN, BODY_SLACK, ClipMsg, FilePart, FormatPart, MAX_FILE_NAME, MAX_HEADER, MAX_NAME, Msg, OfferMsg, PAIR_ALPN,
-        PeerInfo, clean, hash_part, is_text, net, read_frame, send_msg, size, valid_id, write_frame,
+        PeerInfo, clean, hash_part, net, read_frame, send_msg, valid_id, write_frame,
     },
-    store::{self, HISTORY_LEN, io},
+    store::{self, HISTORY_LEN, Meta, PREVIEW_BYTES, io},
 };
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -64,14 +64,14 @@ pub struct State {
     /// Addresses of unpaired devices that discovery found, for `pair_device`.
     pub found: HashMap<String, Vec<String>>,
     dialing: HashSet<String>,
-    /// Newest first.
-    pub history: Vec<Clip>,
+    /// Newest first. Only what the list shows; the data is on disk (`store::load_item`).
+    pub history: Vec<Meta>,
     /// The last item given to the app; when the app reports it back, it isn't sent again.
     last_delivered: Option<String>,
     /// Offers we got, newest first: (item id, device that has it, size).
     offers: VecDeque<(String, String, u64)>,
-    /// `fetch` calls waiting for an item.
-    fetches: HashMap<String, Vec<oneshot::Sender<Clip>>>,
+    /// `fetch` calls waiting for an item to be in the history.
+    fetches: HashMap<String, Vec<oneshot::Sender<()>>>,
     metered: bool,
     pub paused: bool,
     pub link: Option<Link>,
@@ -99,6 +99,15 @@ impl State {
             online: self.conns.contains_key(&p.id),
         };
         self.peers.values().map(device).collect()
+    }
+
+    /// Puts an item first in the history. Its data must already be saved. Returns the ids that dropped out, for
+    /// `Inner::save_history`.
+    fn add_history(&mut self, meta: Meta) -> Vec<String> {
+        self.history.retain(|h| h.id != meta.id);
+        self.history.insert(0, meta);
+        let keep = self.history.len().min(HISTORY_LEN);
+        self.history.split_off(keep).into_iter().map(|h| h.id).collect()
     }
 
     /// A catch-up (`latest`) item counts only if it's newer than the newest one we have.
@@ -368,11 +377,12 @@ impl Inner {
             let latest = {
                 let s = self.lock();
                 let latest = s.history.first().zip(s.conns.get(from)).filter(|_| !s.paused);
-                latest.map(|(clip, c)| (clip.clone(), c.conn.clone()))
+                latest.map(|(meta, c)| (meta.clone(), c.conn.clone()))
             };
-            if let Some((clip, conn)) = latest {
+            if let Some((meta, conn)) = latest {
+                let this = self.clone();
                 self.spawn(async move {
-                    let _ = send_item(&conn, &clip, metered, true).await;
+                    let _ = send_item(&conn, &this.dir, &meta, metered, true).await;
                 });
             }
         }
@@ -393,7 +403,7 @@ impl Inner {
                 .iter()
                 .find(|o| o.0 == m.id && fetching)
                 .map_or(SIZE_CAP, |o| o.2.max(SIZE_CAP));
-            if total > cap + BODY_SLACK {
+            if total > cap.saturating_add(BODY_SLACK) {
                 return Err(net("item too big"));
             }
             if !fetching && (s.paused || (m.latest && !s.is_newer(m.time_ms))) {
@@ -401,25 +411,24 @@ impl Inner {
             }
         }
 
+        // Formats and files arrive in part files of their own and move in place once they match the id, so a transfer
+        // that fails, or runs at the same time, never touches the data of the same item that the history points to.
         let mut h = blake3::Hasher::new();
-        let mut formats = Vec::new();
-        for f in m.formats {
-            let mut data = vec![0; usize::try_from(f.size).map_err(net)?];
-            recv.read_exact(&mut data).await.map_err(net)?;
-            hash_part(&mut h, &f.mime, f.size);
-            h.update(&data);
-            formats.push(Format { mime: f.mime, data });
-        }
-        // Files arrive in a folder of their own and move to `dir` once they match the id, so a transfer that fails,
-        // or runs at the same time, never touches the files of the same item that the history points to.
+        let blob_part = store::blob_part(&self.dir, &m.id).await?;
         let dir = self.dir.join("files").join(&m.id);
         let part = self
             .dir
             .join("files")
             .join(format!("{}.{:x}", m.id, rand::random::<u64>()));
-        let files = match receive_files(&mut recv, &mut h, &part, &dir, m.files).await {
-            Ok(files) if h.finalize().to_hex().as_str() == m.id => files,
+        let got = async {
+            let text = receive_formats(&mut recv, &mut h, &blob_part, &m.formats).await?;
+            let files = receive_files(&mut recv, &mut h, &part, &dir, m.files).await?;
+            Ok::<_, Error>((text, files))
+        };
+        let (text, files) = match got.await {
+            Ok(got) if h.finalize().to_hex().as_str() == m.id => got,
             _ => {
+                let _ = tokio::fs::remove_file(&blob_part).await;
                 let _ = tokio::fs::remove_dir_all(&part).await;
                 return Err(net("the item didn't match its id"));
             }
@@ -431,32 +440,39 @@ impl Inner {
                 let _ = tokio::fs::remove_dir_all(&part).await;
             }
         }
-        let clip = Clip {
+        tokio::fs::rename(&blob_part, store::blob_path(&self.dir, &m.id))
+            .await
+            .map_err(io)?;
+        let meta = Meta {
             id: m.id,
             from: from.to_string(),
             time_ms: m.time_ms,
-            formats,
+            formats: m.formats,
             files,
+            text,
         };
-        store::save_blob(&self.dir, &clip).await?;
 
-        let waiters = {
+        let (waiters, forgotten) = {
             let mut s = self.lock();
-            let waiters = s.fetches.remove(&clip.id);
-            if waiters.is_none() && (s.paused || (m.latest && !s.is_newer(clip.time_ms))) {
+            let waiters = s.fetches.remove(&meta.id);
+            if waiters.is_none() && (s.paused || (m.latest && !s.is_newer(meta.time_ms))) {
                 // Paused, or something newer came meanwhile: drop what we saved, unless the history has it.
-                if !s.history.iter().any(|c| c.id == clip.id) {
-                    store::forget(&self.dir, &clip.id);
+                let keep = s.history.iter().any(|h| h.id == meta.id);
+                drop(s);
+                if !keep {
+                    self.save_history(vec![meta.id]);
                 }
                 return Ok(());
             }
-            s.last_delivered = Some(clip.id.clone());
-            self.add_history(&mut s, clip.clone());
-            waiters
+            s.last_delivered = Some(meta.id.clone());
+            let forgotten = s.add_history(meta.clone());
+            (waiters, forgotten)
         };
+        self.save_history(forgotten);
         match waiters {
-            Some(waiters) => waiters.into_iter().for_each(|w| _ = w.send(clip.clone())),
-            None => self.events.on_clip(clip),
+            // Each `fetch` reads it from disk itself.
+            Some(waiters) => waiters.into_iter().for_each(|w| _ = w.send(())),
+            None => self.events.on_clip(store::load_item(&self.dir, &meta).await?),
         }
         Ok(())
     }
@@ -464,7 +480,7 @@ impl Inner {
     fn on_offer(&self, from: &str, m: OfferMsg) {
         {
             let mut s = self.lock();
-            let have = s.history.iter().any(|c| c.id == m.id);
+            let have = s.history.iter().any(|h| h.id == m.id);
             if s.paused || have || !valid_id(&m.id) || (m.latest && !s.is_newer(m.time_ms)) {
                 return;
             }
@@ -486,13 +502,14 @@ impl Inner {
     fn on_request(&self, from: &str, id: &str) {
         let found = {
             let s = self.lock();
-            let clip = s.history.iter().find(|c| c.id == id).filter(|_| !s.paused);
-            clip.zip(s.conns.get(from))
-                .map(|(clip, c)| (clip.clone(), c.conn.clone()))
+            let meta = s.history.iter().find(|h| h.id == id).filter(|_| !s.paused);
+            meta.zip(s.conns.get(from))
+                .map(|(meta, c)| (meta.clone(), c.conn.clone()))
         };
-        if let Some((clip, conn)) = found {
+        if let Some((meta, conn)) = found {
+            let dir = self.dir.clone();
             self.spawn(async move {
-                let _ = send_clip(&conn, &clip, false).await;
+                let _ = send_clip(&conn, &dir, &meta, false).await;
             });
         }
     }
@@ -623,38 +640,54 @@ impl Inner {
             }
             s.last_delivered = None;
         }
-        let clip = Clip {
+        let text = formats
+            .iter()
+            .find(|f| f.mime.starts_with("text/plain"))
+            .map(|f| store::preview(&f.data[..f.data.len().min(PREVIEW_BYTES)]));
+        store::save_blob(&self.dir, &id, &formats).await?;
+        let meta = Meta {
             id,
             from: self.id.clone(),
             time_ms: now_ms(),
-            formats,
+            formats: formats
+                .into_iter()
+                .map(|f| FormatPart {
+                    mime: f.mime,
+                    size: f.data.len() as u64,
+                })
+                .collect(),
             files,
+            text,
         };
-        store::save_blob(&self.dir, &clip).await?;
-        let targets: Vec<(Connection, bool)> = {
+        let (targets, forgotten) = {
             let mut s = self.lock();
-            self.add_history(&mut s, clip.clone());
+            let forgotten = s.add_history(meta.clone());
             // Devices whose hello hasn't arrived yet get the item as their catch-up instead.
-            s.conns
+            let targets: Vec<(Connection, bool)> = s
+                .conns
                 .values()
                 .filter_map(|c| Some((c.conn.clone(), c.metered?)))
-                .collect()
+                .collect();
+            (targets, forgotten)
         };
+        self.save_history(forgotten);
+        // Each send streams the data from disk, so sending to many devices doesn't copy it in memory.
+        let meta = Arc::new(meta);
         for (conn, metered) in targets {
-            let clip = clip.clone();
+            let (dir, meta) = (self.dir.clone(), meta.clone());
             self.spawn(async move {
-                let _ = send_item(&conn, &clip, metered, false).await;
+                let _ = send_item(&conn, &dir, &meta, metered, false).await;
             });
         }
         Ok(())
     }
 
     pub async fn fetch(self: &Arc<Self>, id: &str) -> Result<Clip, Error> {
+        if self.lock().history.iter().any(|h| h.id == id) {
+            return self.item(id).await;
+        }
         let (rx, conn, size) = {
             let mut s = self.lock();
-            if let Some(clip) = s.history.iter().find(|c| c.id == id) {
-                return Ok(clip.clone());
-            }
             if s.paused {
                 return Err(net("sharing is paused"));
             }
@@ -674,7 +707,7 @@ impl Inner {
             send_msg(&conn, &Msg::Request { id: id.to_string() }).await?;
             // The answer comes on this connection; if it closes, it won't come.
             tokio::select! {
-                clip = tokio::time::timeout(limit, rx) => clip.map_err(net)?.map_err(net),
+                got = tokio::time::timeout(limit, rx) => got.map_err(net)?.map_err(net),
                 e = conn.closed() => Err(net(e)),
             }
         };
@@ -682,7 +715,13 @@ impl Inner {
         if res.is_err() {
             self.lock().fetches.remove(id);
         }
-        res
+        res?;
+        self.item(id).await
+    }
+
+    pub async fn item(&self, id: &str) -> Result<Clip, Error> {
+        let meta = self.lock().history.iter().find(|h| h.id == id).cloned();
+        store::load_item(&self.dir, &meta.ok_or(Error::NotFound)?).await
     }
 
     pub async fn unpair(self: &Arc<Self>, id: &str) -> Result<(), Error> {
@@ -747,17 +786,26 @@ impl Inner {
         self.ep.close().await;
     }
 
-    /// Puts an item first in the history and saves the list. Its data must already be saved (`store::save_blob`).
-    // ponytail: the whole history is kept in memory and written under the state lock; fine for 50 clipboard items.
-    fn add_history(&self, s: &mut State, clip: Clip) {
-        s.history.retain(|c| c.id != clip.id);
-        s.history.insert(0, clip);
-        if s.history.len() > HISTORY_LEN {
-            for old in s.history.split_off(HISTORY_LEN) {
-                store::forget(&self.dir, &old.id);
-            }
+    /// Saves the history list, and deletes the data of items that left it. Call it without the state lock.
+    fn save_history(self: &Arc<Self>, forgotten: Vec<String>) {
+        {
+            let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+            let history = self.lock().history.clone();
+            store::save_history(&self.dir, &history);
         }
-        store::save_history(&self.dir, &s.history);
+        if forgotten.is_empty() {
+            return;
+        }
+        // Off the async threads: received files can be big.
+        let this = self.clone();
+        self.rt.spawn_blocking(move || {
+            for id in forgotten {
+                // It may have come back meanwhile.
+                if !this.lock().history.iter().any(|h| h.id == id) {
+                    store::forget(&this.dir, &id);
+                }
+            }
+        });
     }
 }
 
@@ -779,35 +827,29 @@ async fn bind(key: SecretKey, port: u16) -> Result<Endpoint, Error> {
 }
 
 /// Sends an item whole, or as an offer if it's too big or the device is metered and it isn't text.
-async fn send_item(conn: &Connection, clip: &Clip, metered: bool, latest: bool) -> Result<(), Error> {
-    let size = size(clip);
-    if size <= SIZE_CAP && (!metered || is_text(clip)) {
-        return send_clip(conn, clip, latest).await;
+async fn send_item(conn: &Connection, dir: &Path, meta: &Meta, metered: bool, latest: bool) -> Result<(), Error> {
+    let size = meta.size();
+    if size <= SIZE_CAP && (!metered || meta.is_text()) {
+        return send_clip(conn, dir, meta, latest).await;
     }
     let offer = OfferMsg {
-        id: clip.id.clone(),
-        time_ms: clip.time_ms,
+        id: meta.id.clone(),
+        time_ms: meta.time_ms,
         size,
-        mimes: clip.formats.iter().map(|f| f.mime.clone()).collect(),
-        file_names: clip.files.iter().map(|f| f.name.clone()).collect(),
+        mimes: meta.formats.iter().map(|f| f.mime.clone()).collect(),
+        file_names: meta.files.iter().map(|f| f.name.clone()).collect(),
         latest,
     };
     send_msg(conn, &Msg::Offer(offer)).await
 }
 
-async fn send_clip(conn: &Connection, clip: &Clip, latest: bool) -> Result<(), Error> {
+/// Sends an item, streaming its formats from `history/<id>` and its files from their paths.
+async fn send_clip(conn: &Connection, dir: &Path, meta: &Meta, latest: bool) -> Result<(), Error> {
     let header = ClipMsg {
-        id: clip.id.clone(),
-        time_ms: clip.time_ms,
-        formats: clip
-            .formats
-            .iter()
-            .map(|f| FormatPart {
-                mime: f.mime.clone(),
-                size: f.data.len() as u64,
-            })
-            .collect(),
-        files: clip
+        id: meta.id.clone(),
+        time_ms: meta.time_ms,
+        formats: meta.formats.clone(),
+        files: meta
             .files
             .iter()
             .map(|f| FilePart {
@@ -819,16 +861,63 @@ async fn send_clip(conn: &Connection, clip: &Clip, latest: bool) -> Result<(), E
     };
     let mut send = conn.open_uni().await.map_err(net)?;
     write_frame(&mut send, &Msg::Clip(header)).await?;
-    for f in &clip.formats {
-        send.write_all(&f.data).await.map_err(net)?;
-    }
-    for f in &clip.files {
-        let file = tokio::fs::File::open(&f.path).await.map_err(io)?;
-        if tokio::io::copy(&mut file.take(f.size), &mut send).await.map_err(io)? != f.size {
+    let blob = (store::blob_path(dir, &meta.id), meta.formats_size());
+    let files = meta.files.iter().map(|f| (PathBuf::from(&f.path), f.size));
+    for (path, size) in std::iter::once(blob).chain(files) {
+        let file = tokio::fs::File::open(&path).await.map_err(io)?;
+        if tokio::io::copy(&mut file.take(size), &mut send).await.map_err(io)? != size {
             return Err(io("a file changed while sending"));
         }
     }
     send.finish().map_err(net)
+}
+
+/// Saves an item's formats to `path` as they arrive, adding them to the item id. Returns the start of its plain text.
+async fn receive_formats(
+    recv: &mut RecvStream,
+    h: &mut blake3::Hasher,
+    path: &Path,
+    parts: &[FormatPart],
+) -> Result<Option<String>, Error> {
+    let mut out = tokio::fs::File::create(path).await.map_err(io)?;
+    let mut text = None;
+    for part in parts {
+        let mut head = Vec::new();
+        let want = text.is_none() && part.mime.starts_with("text/plain");
+        receive_part(recv, h, &part.mime, part.size, &mut out, want.then_some(&mut head)).await?;
+        if want {
+            text = Some(store::preview(&head));
+        }
+    }
+    out.flush().await.map_err(io)?;
+    Ok(text)
+}
+
+/// Copies one format or file of `len` bytes from the stream to `out`, adding it to the item id. Its first
+/// `PREVIEW_BYTES` also go to `head`.
+async fn receive_part(
+    recv: &mut RecvStream,
+    h: &mut blake3::Hasher,
+    name: &str,
+    len: u64,
+    out: &mut tokio::fs::File,
+    mut head: Option<&mut Vec<u8>>,
+) -> Result<(), Error> {
+    hash_part(h, name, len);
+    let mut buf = vec![0; 64 * 1024];
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(buf.len() as u64) as usize;
+        recv.read_exact(&mut buf[..n]).await.map_err(net)?;
+        h.update(&buf[..n]);
+        out.write_all(&buf[..n]).await.map_err(io)?;
+        if let Some(head) = head.as_deref_mut() {
+            let room = PREVIEW_BYTES.saturating_sub(head.len());
+            head.extend_from_slice(&buf[..n.min(room)]);
+        }
+        left -= n as u64;
+    }
+    Ok(())
 }
 
 /// Saves an item's files to `tmp` as they arrive, adding them to the item id. Their paths are in `dir`, where the
@@ -842,7 +931,6 @@ async fn receive_files(
 ) -> Result<Vec<File>, Error> {
     let mut files = Vec::new();
     let mut names = HashSet::new();
-    let mut buf = vec![0; 64 * 1024];
     for (i, part) in parts.into_iter().enumerate() {
         tokio::fs::create_dir_all(tmp).await.map_err(io)?;
         // Ignoring case, as on macOS, where "A" and "a" are the same file.
@@ -852,15 +940,7 @@ async fn receive_files(
         }
         let path = dir.join(&name);
         let mut out = tokio::fs::File::create(tmp.join(&name)).await.map_err(io)?;
-        hash_part(h, &part.name, part.size);
-        let mut left = part.size;
-        while left > 0 {
-            let n = left.min(buf.len() as u64) as usize;
-            recv.read_exact(&mut buf[..n]).await.map_err(net)?;
-            h.update(&buf[..n]);
-            out.write_all(&buf[..n]).await.map_err(io)?;
-            left -= n as u64;
-        }
+        receive_part(recv, h, &part.name, part.size, &mut out, None).await?;
         out.flush().await.map_err(io)?;
         files.push(File {
             name: part.name,

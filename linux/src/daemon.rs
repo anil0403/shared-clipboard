@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
-use sharedclip::{Clip, Config, Device, Error, Events, Node, Offer, Platform};
+use sharedclip::{Clip, Config, Device, Error, Events, Node, Offer, Platform, Summary};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -427,7 +427,7 @@ async fn session(
 }
 
 /// One history line: age, where it came from and what it is.
-fn summary(clip: &Clip, from: &str) -> String {
+fn summary(clip: &Summary, from: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -438,27 +438,15 @@ fn summary(clip: &Clip, from: &str) -> String {
         60..1440 => format!("{}h", mins / 60),
         _ => format!("{}d", mins / 1440),
     };
-    let text = clip.formats.iter().find(|f| f.mime.starts_with("text/plain"));
-    let what = match text {
-        Some(f) => String::from_utf8_lossy(&f.data)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(60)
-            .collect(),
+    let what = match &clip.text {
+        Some(text) => text.lines().next().unwrap_or_default().chars().take(60).collect(),
         None if !clip.files.is_empty() => clip
             .files
             .iter()
             .map(|f| f.name.as_str())
             .collect::<Vec<_>>()
             .join(", "),
-        None => clip
-            .formats
-            .iter()
-            .map(|f| f.mime.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
+        None => clip.mimes.join(", "),
     };
     format!("{age:>4}  {from:<20}  {what}")
 }

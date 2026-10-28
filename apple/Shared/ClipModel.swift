@@ -19,7 +19,7 @@ final class ClipModel: ObservableObject {
 
     @Published private(set) var node: Node?
     @Published var devices: [Device] = []
-    @Published var history: [Clip] = []
+    @Published var history: [Summary] = []
     @Published var offers: [Offer] = []
     /// Devices Bonjour sees now, paired or not: id → name.
     @Published var nearby: [String: String] = [:]
@@ -100,6 +100,16 @@ final class ClipModel: ObservableObject {
         do {
             received(try await node.fetch(id: offer.id))
             offers.removeAll { $0.id == offer.id }
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    /// Puts a history item back on the clipboard.
+    func copy(_ item: Summary) async {
+        guard let node else { return }
+        do {
+            Clipboard.write(try await node.item(id: item.id))
         } catch {
             message = error.localizedDescription
         }
@@ -197,15 +207,14 @@ final class CoreEvents: Events {
     }
 }
 
-extension Clip {
+extension Summary {
     /// One line for menus and lists.
     var summary: String {
         if !files.isEmpty { return files.map(\.name).joined(separator: ", ") }
-        if let text = formats.first(where: { $0.mime.hasPrefix("text/plain") }) {
-            let line = String(decoding: text.data.prefix(300), as: UTF8.self).split(whereSeparator: \.isNewline).first
-            return String((line ?? "").prefix(60))
+        if let text {
+            return String((text.split(whereSeparator: \.isNewline).first ?? "").prefix(60))
         }
-        return formats.contains { $0.mime.hasPrefix("image/") } ? "Image" : "Item"
+        return mimes.contains { $0.hasPrefix("image/") } ? "Image" : "Item"
     }
 }
 

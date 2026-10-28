@@ -41,8 +41,8 @@ struct GetLatestClipIntent: AppIntent {
         // Devices send their latest item when they connect.
         await model.waitForDevices()
         let ownId = model.node?.id()
-        if let clip = model.history.first(where: { $0.from != ownId }) {
-            Clipboard.write(clip)
+        if let item = model.history.first(where: { $0.from != ownId }) {
+            await model.copy(item)
         }
         #endif
         return .result()

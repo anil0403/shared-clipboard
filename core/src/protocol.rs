@@ -3,7 +3,7 @@
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{Clip, Error, Platform};
+use crate::{Error, Platform};
 
 pub const ALPN: &[u8] = b"sharedclip/1";
 pub const PAIR_ALPN: &[u8] = b"sharedclip/pair/1";
@@ -67,7 +67,7 @@ pub struct OfferMsg {
 }
 
 /// One format in a `clip` header.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormatPart {
     pub mime: String,
     pub size: u64,
@@ -184,16 +184,6 @@ pub fn clean(name: &str, max: usize) -> String {
 /// An item id is 64 lowercase hex characters; we check it before using it in a path.
 pub fn valid_id(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// Total size of an item's formats and files.
-pub fn size(clip: &Clip) -> u64 {
-    clip.formats.iter().map(|f| f.data.len() as u64).sum::<u64>() + clip.files.iter().map(|f| f.size).sum::<u64>()
-}
-
-/// Text only: goes right away even to a metered device.
-pub fn is_text(clip: &Clip) -> bool {
-    clip.files.is_empty() && clip.formats.iter().all(|f| f.mime.starts_with("text/"))
 }
 
 #[cfg(test)]
