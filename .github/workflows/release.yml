@@ -14,7 +14,8 @@
 #                beta stays a pre-release and is never "latest".
 # Sending a build from TestFlight to App Review, and from Play internal testing to production, stays by hand.
 #
-# Set up, in Settings ▸ Environments ▸ `release`: required reviewers (the owner), and these as its environment secrets,
+# Set up, in Settings ▸ Environments ▸ `release`: only `v*` tags may deploy; required reviewers (the owner) if the plan
+# allows them (GitHub Free doesn't, on a private repo). And these as its environment secrets,
 # so that only these jobs can read them. A step whose secret is missing is skipped with a notice.
 #   MINISIGN_SECRET_KEY          the whole minisign secret key file; signs every file on the GitHub release
 #   MINISIGN_PASSWORD            its password (leave it unset for a key made with `minisign -G -W`)
@@ -110,6 +111,7 @@ jobs:
             jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' |
             while read -r program; do cp "$program" "dist/$name/"; done
           [[ -n $(ls "dist/$name") ]] || { echo "::error::linux/ built no program"; exit 1; }
+          cp linux/sharedclip.service "dist/$name/"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           rm -r "dist/$name"
       - uses: actions/upload-artifact@v7
@@ -146,6 +148,7 @@ jobs:
           mkdir app
           tar -xzf dist/*.tar.gz -C app --strip-components=1
           for program in app/*; do
+            [[ -x $program ]] || continue
             if ldd "$program" | grep 'not found'; then echo "::error::$program is missing libraries on $SYSTEM"; exit 1; fi
             "$program" --version
           done
