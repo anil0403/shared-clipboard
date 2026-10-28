@@ -3,12 +3,15 @@
 
 use std::env;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::Read;
+use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::sync::{Mutex, mpsc};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use sharedclip::{File, Format};
+use tokio::io::AsyncReadExt;
+use tokio::net::unix::pipe;
+use tokio::runtime::{Builder, Runtime};
 use wl_clipboard_rs::copy::{self, MimeSource, MimeType, Options, Source};
 use wl_clipboard_rs::paste::{self, Seat};
 use wl_clipboard_rs::watch::{ClipboardEvent, ClipboardType, Watcher};
@@ -221,15 +224,23 @@ fn unescape(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Reads one type's data on its own thread, so an app that never answers can't hang the watcher.
-fn read_pipe(pipe: impl Read + Send + 'static) -> Option<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut data = Vec::new();
-        let ok = pipe.take(MAX_READ + 1).read_to_end(&mut data).is_ok() && data.len() as u64 <= MAX_READ;
-        let _ = tx.send(ok.then_some(data));
+/// Reads one type's data without blocking, so an app that never answers can't hang the watcher.
+fn read_pipe(pipe: impl Into<OwnedFd>) -> Option<Vec<u8>> {
+    // Dropping the read at the timeout closes the pipe, so no thread is left waiting on a hung app.
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    let rt = RT.get_or_init(|| {
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
     });
-    rx.recv_timeout(READ_TIMEOUT).ok().flatten()
+    rt.block_on(async {
+        let mut pipe = pipe::Receiver::from_owned_fd(pipe.into()).ok()?.take(MAX_READ + 1);
+        let mut data = Vec::new();
+        let read = pipe.read_to_end(&mut data);
+        tokio::time::timeout(READ_TIMEOUT, read).await.ok()?.ok()?;
+        (data.len() as u64 <= MAX_READ).then_some(data)
+    })
 }
 
 fn hash(formats: &[Format], files: &[File]) -> u64 {
@@ -359,6 +370,15 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_pipe() {
+        use std::io::Write;
+        let (read, mut write) = std::io::pipe().unwrap();
+        write.write_all(b"hi").unwrap();
+        drop(write);
+        assert_eq!(read_pipe(read).as_deref(), Some(&b"hi"[..]));
+    }
+
+    #[test]
     fn peers_cant_set_file_types() {
         let mimes = |formats: &[Format], files: &[File]| -> Vec<(String, String)> {
             offer(formats, files)
@@ -405,6 +425,7 @@ mod tests {
     #[ignore = "needs a Wayland compositor with data-control"]
     fn live() {
         use std::process::{Command, Stdio};
+        use std::sync::mpsc;
         let normal = env::var("WAYLAND_DISPLAY").expect("WAYLAND_DISPLAY");
         let paste = |args: &[&str]| {
             let out = Command::new("wl-paste")
