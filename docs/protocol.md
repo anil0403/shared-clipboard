@@ -60,8 +60,11 @@ The only feature so far is `metered`: the device is on mobile data. A device sen
 - **Catch-up:** when a device gets the first `hello` on a connection, it sends its newest item, as a `clip` or an
   `offer` by the rules above, with `"latest": true`. The receiver uses it only if its `time_ms` is newer than the
   newest item it has, so a device that was away gets what was copied meanwhile without undoing newer copies.
-- **Files:** a receiver saves files under its own folder and makes each name safe for that: `/`, `\` and NUL become
-  `_`, and an empty name, `.` or `..` becomes `file`. The item keeps the original `name`, so its id doesn't change.
+- **Files:** a receiver saves files under its own folder and makes each name safe for that: `/`, `\` and control
+  characters become `_`, a name is cut to 200 bytes, and an empty name, `.` or `..` becomes `file`. The item keeps
+  the original `name`, so its id doesn't change.
+- **Names:** before showing a device or file name from another device, a receiver drops control characters and
+  text-direction overrides (they could drive a terminal or disguise the name) and cuts device names to 64 characters.
 - **Limits:** a header is at most 64 KB. A `clip` body bigger than 25 MiB plus 1 MiB is refused, unless it answers a
   `request` (then the offer's size plus 1 MiB). A pairing message is at most 64 KB.
 - **No echo:** when the app reports a clipboard change whose id is the item the core just gave it, the core doesn't
