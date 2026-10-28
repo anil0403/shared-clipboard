@@ -56,8 +56,6 @@ object Shared {
     var paused by mutableStateOf(false)
     /** Goes up when the history changes. */
     var historyVersion by mutableIntStateOf(0)
-    /** When the last item we sent was copied, so the same copy isn't sent twice. */
-    var lastSent = 0L
 }
 
 data class Nearby(val id: String, val name: String)

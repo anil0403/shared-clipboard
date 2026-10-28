@@ -20,6 +20,7 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
+import androidx.core.content.edit
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import com.noobsbot.sharedclip.core.Clip
@@ -34,6 +35,9 @@ private const val LABEL = "Shared Clipboard"
 
 // ClipDescription.EXTRA_IS_SENSITIVE. Password managers set it on older Androids too.
 private const val SENSITIVE = "android.content.extra.IS_SENSITIVE"
+
+// ClipDescription.EXTRA_IS_REMOTE_DEVICE: tells Android 13+ the item came from another device.
+private const val REMOTE = "android.content.extra.IS_REMOTE_DEVICE"
 
 /** Puts an item from another device on the clipboard: text and HTML as they are, images and files as URIs. */
 suspend fun Context.writeClip(clip: Clip) {
@@ -52,8 +56,7 @@ suspend fun Context.writeClip(clip: Clip) {
         else -> return
     }
     (if (text != null) uris else uris.drop(1)).forEach { data.addItem(contentResolver, ClipData.Item(it)) }
-    // ClipDescription.EXTRA_IS_REMOTE_DEVICE: tells Android 13+ the item came from another device.
-    data.description.extras = PersistableBundle().apply { putBoolean("android.content.extra.IS_REMOTE_DEVICE", true) }
+    data.description.extras = PersistableBundle().apply { putBoolean(REMOTE, true) }
     getSystemService(ClipboardManager::class.java).setPrimaryClip(data)
 }
 
@@ -82,7 +85,7 @@ private fun Context.saveDownload(file: ClipFile): Uri? = try {
 
 /**
  * Sends what's on the clipboard, unless it's marked sensitive. Android lets only the app in focus read it.
- * [auto] sends (while our screen is open) skip an item already sent.
+ * [auto] sends (while our screen is open) skip items we put there and the item already sent, even after a restart.
  */
 suspend fun Context.sendClipboard(auto: Boolean) {
     val clip = getSystemService(ClipboardManager::class.java).primaryClip ?: return
@@ -91,8 +94,12 @@ suspend fun Context.sendClipboard(auto: Boolean) {
         if (!auto) toast("Not sent: the app that copied it marked it as private")
         return
     }
-    if (auto && (desc.timestamp == Shared.lastSent || Shared.node == null)) return
-    Shared.lastSent = desc.timestamp
+    val prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
+    // Ours came from another device. Android reads it back slightly different (text/plain;charset=utf-8 for
+    // text/plain), so the core wouldn't see it's the same item and would send it back as a new one.
+    val ours = desc.label?.toString() == LABEL || desc.extras?.getBoolean(REMOTE) == true
+    if (auto && (ours || desc.timestamp == prefs.getLong("lastSent", 0))) return
+    prefs.edit { putLong("lastSent", desc.timestamp) }
     val items = List(clip.itemCount) { clip.getItemAt(it) }
     send(items.firstNotNullOfOrNull { it.text }, items.firstNotNullOfOrNull { it.htmlText }, items.mapNotNull { it.uri })
 }
