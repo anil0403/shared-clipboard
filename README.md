@@ -22,10 +22,6 @@ From [Releases](https://github.com/anil0403/shared-clipboard/releases):
   ```sh
   curl -fsSL https://raw.githubusercontent.com/anil0403/shared-clipboard/main/install.sh | sh
   ```
-  While the repository is private, only the [GitHub CLI](https://cli.github.com) can read it (`gh auth login` once):
-  ```sh
-  gh api -H "Accept: application/vnd.github.raw" repos/anil0403/shared-clipboard/contents/install.sh | sh
-  ```
   It installs `~/.local/bin/sharedclip` and the systemd user service. To remove it:
   `systemctl --user disable --now sharedclip && rm ~/.local/bin/sharedclip ~/.config/systemd/user/sharedclip.service`.
   Or by hand: unpack `sharedclip-<version>-x86_64-linux.tar.gz` and copy those two files to the same places.
