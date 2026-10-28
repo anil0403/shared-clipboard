@@ -1,6 +1,7 @@
 //! The Wayland clipboard through data-control (wl-clipboard-rs): watch it, set it, and map its types to the core's
 //! `Format`s and `File`s.
 
+use std::collections::VecDeque;
 use std::env;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::fd::OwnedFd;
@@ -33,9 +34,12 @@ const TEXT: [&str; 5] = [
 const MAX_READ: u64 = 100 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Hash of the item we last put on the clipboard or sent: our own changes and the compositor's re-offer of its kept
-/// copy (when the app that copied quits) come back with the same content and are skipped.
+/// Hash of the last item on the clipboard: the compositor's re-offer of its kept copy (when the app that copied quits)
+/// comes back with the same content and is skipped.
 static LAST: Mutex<u64> = Mutex::new(0);
+/// Hashes of the last items `set` put on the clipboard: each skips its own change event once, even when items come
+/// faster than their events.
+static OURS: Mutex<VecDeque<u64>> = Mutex::new(VecDeque::new());
 
 /// Uses `$WAYLAND_DISPLAY-trusted` when it exists: noobsbot-desktop offers data-control only on that socket.
 pub fn use_trusted_socket() {
@@ -101,7 +105,9 @@ pub fn watch(mut watcher: Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> pas
                 .collect(),
             false => Vec::new(),
         };
-        if is_new(hash(&formats, &files)) && !first && !(formats.is_empty() && files.is_empty()) {
+        let h = read_hash(&formats, &files);
+        let (ours, new) = (is_ours(h), is_new(h));
+        if new && !ours && !first && !(formats.is_empty() && files.is_empty()) {
             send(formats, files);
         }
     }
@@ -111,7 +117,7 @@ pub fn watch(mut watcher: Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> pas
 /// `x-special/gnome-copied-files`. Remembers it, so its change event isn't sent back.
 pub fn set(formats: &[Format], files: &[File]) -> Result<(), copy::Error> {
     let sources = offer(formats, files);
-    is_new(hash(&read_back(&sources), files));
+    remember(set_hash(&sources, files));
     let sources = sources
         .into_iter()
         .map(|(mime, data)| MimeSource {
@@ -134,6 +140,8 @@ fn offer(formats: &[Format], files: &[File]) -> Vec<(String, Vec<u8>)> {
     };
     for f in formats {
         if f.mime.starts_with("text/plain") {
+            // ponytail: wl-clipboard-rs owns one copy per type (Source::Bytes is a Box, then an Arc), so text is held
+            // once per text type: a 100 MB text costs ~500 MB while it's on the clipboard. Needs shared sources upstream.
             TEXT.iter().for_each(|m| add(m, &f.data));
         } else if ALLOWED.contains(&f.mime.as_str()) {
             add(&f.mime, &f.data);
@@ -157,16 +165,28 @@ fn data<'a>(sources: &'a [(String, Vec<u8>)], mime: &str) -> &'a [u8] {
     sources.iter().find(|(m, _)| m == mime).map_or(&[], |(_, d)| d)
 }
 
-/// The formats the watcher reads back from what we offer.
-fn read_back(sources: &[(String, Vec<u8>)]) -> Vec<Format> {
+/// The formats the watcher reads back from what we offer, as (type sent, data).
+fn read_back(sources: &[(String, Vec<u8>)]) -> Vec<(&'static str, &[u8])> {
     let mimes: Vec<String> = sources.iter().map(|(m, _)| m.clone()).collect();
     pick(&mimes)
         .into_iter()
-        .map(|(from, to)| Format {
-            mime: to.into(),
-            data: data(sources, from).to_vec(),
-        })
+        .map(|(from, to)| (to, data(sources, from)))
         .collect()
+}
+
+/// The hash of an item `watch` read.
+fn read_hash(formats: &[Format], files: &[File]) -> u64 {
+    hash(formats.iter().map(|f| (f.mime.as_str(), &f.data[..])), files)
+}
+
+/// The hash `watch` gets for what we offer: it reads no formats when there are files.
+fn set_hash(sources: &[(String, Vec<u8>)], files: &[File]) -> u64 {
+    let formats = if files.is_empty() {
+        read_back(sources)
+    } else {
+        Vec::new()
+    };
+    hash(formats, files)
 }
 
 /// The offered types we send, as (type offered, type sent): text, HTML and PNG. Files come from `text/uri-list`.
@@ -243,15 +263,32 @@ fn read_pipe(pipe: impl Into<OwnedFd>) -> Option<Vec<u8>> {
     })
 }
 
-fn hash(formats: &[Format], files: &[File]) -> u64 {
+/// Hash of an item's (type, data) pairs and files; a file edited since counts as new.
+fn hash<'a>(formats: impl IntoIterator<Item = (&'a str, &'a [u8])>, files: &[File]) -> u64 {
     let mut h = DefaultHasher::new();
-    for f in formats {
-        (&f.mime, &f.data).hash(&mut h);
-    }
+    formats.into_iter().for_each(|f| f.hash(&mut h));
     for f in files {
-        f.path.hash(&mut h);
+        let meta = std::fs::metadata(&f.path).ok();
+        (&f.path, meta.map(|m| (m.len(), m.modified().ok()))).hash(&mut h);
     }
     h.finish()
+}
+
+fn remember(hash: u64) {
+    let mut ours = OURS.lock().unwrap();
+    if ours.len() == 8 {
+        ours.pop_front();
+    }
+    ours.push_back(hash);
+}
+
+/// True once for each `remember`ed hash.
+fn is_ours(hash: u64) -> bool {
+    let mut ours = OURS.lock().unwrap();
+    ours.iter()
+        .position(|&h| h == hash)
+        .and_then(|i| ours.remove(i))
+        .is_some()
 }
 
 /// Remembers `hash` as the last item; false if it already was.
@@ -336,8 +373,8 @@ mod tests {
 
     #[test]
     fn repeats_are_skipped() {
-        let a = hash(&[fmt("text/plain", "a")], &[]);
-        let b = hash(&[fmt("text/plain", "b")], &[]);
+        let a = read_hash(&[fmt("text/plain", "a")], &[]);
+        let b = read_hash(&[fmt("text/plain", "b")], &[]);
         assert!(is_new(a));
         assert!(!is_new(a), "the same item again");
         assert!(is_new(b));
@@ -364,8 +401,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            read_back(&offered),
-            [fmt("text/plain", "hi"), fmt("text/html", "<b>hi</b>")]
+            set_hash(&offered, &[]),
+            read_hash(&[fmt("text/plain", "hi"), fmt("text/html", "<b>hi</b>")], &[])
         );
     }
 
@@ -376,6 +413,40 @@ mod tests {
         write.write_all(b"hi").unwrap();
         drop(write);
         assert_eq!(read_pipe(read).as_deref(), Some(&b"hi"[..]));
+    }
+
+    #[test]
+    fn our_items_are_skipped_once() {
+        let hashes: Vec<u64> = (0..9)
+            .map(|i| read_hash(&[fmt("text/plain", &i.to_string())], &[]))
+            .collect();
+        // Two items set before either change event comes.
+        remember(hashes[0]);
+        remember(hashes[1]);
+        assert!(is_ours(hashes[0]) && is_ours(hashes[1]));
+        assert!(!is_ours(hashes[0]), "copied again later, it's sent");
+        // Only the last 8 are kept.
+        hashes.iter().for_each(|&h| remember(h));
+        assert!(!is_ours(hashes[0]) && is_ours(hashes[8]));
+    }
+
+    #[test]
+    fn files_hash_like_the_watcher_and_edits_count() {
+        let path = env::temp_dir().join(format!("sharedclip-hash-{}.txt", std::process::id()));
+        std::fs::write(&path, "one").unwrap();
+        let file = File {
+            name: "f.txt".into(),
+            path: path.to_str().unwrap().into(),
+            size: 3,
+        };
+        let files = std::slice::from_ref(&file);
+        // With files the watcher reads no formats, so text and HTML sent along don't change the hash.
+        let offered = offer(&[fmt("text/plain", "f.txt"), fmt("text/html", "<a>f</a>")], files);
+        let before = read_hash(&[], files);
+        assert_eq!(set_hash(&offered, files), before);
+        std::fs::write(&path, "edited").unwrap();
+        assert_ne!(read_hash(&[], files), before, "an edited file copied again is new");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
