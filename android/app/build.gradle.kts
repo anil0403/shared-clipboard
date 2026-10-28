@@ -19,6 +19,8 @@ android {
         // Set by CI (.github/set-version.sh), never by hand: see VERSIONING.md.
         versionCode = 1
         versionName = "0.0.0"
+        // The core is only built for these (see RustCore), so leave out JNA's other ABIs too.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     buildFeatures {
@@ -54,6 +56,8 @@ abstract class RustCore @Inject constructor(private val exec: ExecOperations) : 
         val libs = jniLibs.get().asFile
         cargo("ndk", "-t", "arm64-v8a", "-t", "x86_64", "-P", "29", "-o", libs.path,
             "build", "--release", "-p", "sharedclip-core")
+        // iroh and iroh-relay are cdylibs too and cargo-ndk copies them, but nothing loads them.
+        libs.walk().filter { it.isFile && it.name != "libsharedclip.so" }.forEach { it.delete() }
         cargo("run", "-p", "sharedclip-core", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
             "generate", "--library", libs.resolve("arm64-v8a/libsharedclip.so").path,
             "--language", "kotlin", "--out-dir", bindings.get().asFile.path)
