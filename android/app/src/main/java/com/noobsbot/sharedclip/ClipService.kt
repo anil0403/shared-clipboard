@@ -197,7 +197,7 @@ class ClipService : Service() {
                         .setSmallIcon(R.drawable.ic_clip)
                         .setContentTitle("Pair with ${device.name}?")
                         .setContentText("Code $code. Tap to answer.")
-                        .setContentIntent(activity(MainActivity::class.java))
+                        .setContentIntent(activity(Intent(this@ClipService, MainActivity::class.java)))
                         .setAutoCancel(true)
                         .build(),
                 )
@@ -229,8 +229,8 @@ class ClipService : Service() {
             .setSmallIcon(R.drawable.ic_clip)
             .setContentTitle(title)
             .setOngoing(true)
-            .setContentIntent(activity(MainActivity::class.java))
-            .addAction(action("Send clipboard", activity(SendActivity::class.java)))
+            .setContentIntent(activity(Intent(this, MainActivity::class.java)))
+            .addAction(action("Send clipboard", activity(sendClipboardIntent())))
             .addAction(action(if (Shared.paused) "Resume" else "Pause", serviceIntent(PAUSE, null)))
             .build()
     }
@@ -249,8 +249,8 @@ class ClipService : Service() {
         )
     }
 
-    private fun activity(c: Class<*>) =
-        PendingIntent.getActivity(this, 0, Intent(this, c).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
+    private fun activity(intent: Intent) =
+        PendingIntent.getActivity(this, 0, intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
 
     private fun serviceIntent(action: String, id: String?) = PendingIntent.getForegroundService(
         this, id.hashCode(), Intent(this, ClipService::class.java).setAction(action).putExtra("id", id),

@@ -58,6 +58,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Sends the clipboard, for our tile and notification. Not exported, so other apps can't make us send it. -->
+        <activity-alias
+            android:name=".SendClipboard"
+            android:exported="false"
+            android:targetActivity=".SendActivity" />
+
         <service
             android:name=".SendTile"
             android:exported="true"

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -113,6 +114,10 @@ suspend fun Context.send(text: CharSequence?, html: String?, uris: List<Uri>) {
             text?.let { formats += Format("text/plain;charset=utf-8", it.toString().encodeToByteArray()) }
             html?.let { formats += Format("text/html", it.encodeToByteArray()) }
             for (uri in uris) {
+                // Other apps can name any URI, and we'd read it with our own rights: file:// could be our device key.
+                if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority == "$packageName.files") {
+                    throw SecurityException("only shared files can be sent")
+                }
                 val mime = contentResolver.getType(uri)
                 if (mime == "image/png" || mime == "image/jpeg") {
                     formats += Format(mime, contentResolver.openInputStream(uri)!!.use { it.readBytes() })
@@ -140,9 +145,13 @@ private fun Context.cacheFile(uri: Uri): ClipFile {
     return ClipFile(safe, file.path, file.length().toULong())
 }
 
+/** Opens SendActivity to send the clipboard. Only we can: the alias isn't exported (AndroidManifest.xml). */
+fun Context.sendClipboardIntent() = Intent().setClassName(this, "com.noobsbot.sharedclip.SendClipboard")
+
 /** See-through screen that sends the clipboard (tile, notification), a share or selected text, then closes. */
 class SendActivity : ComponentActivity() {
     private var started = false
+    private val clipboard get() = componentName.className.endsWith(".SendClipboard")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -159,13 +168,14 @@ class SendActivity : ComponentActivity() {
                 send(null, null, IntentCompat.getParcelableArrayListExtra(i, Intent.EXTRA_STREAM, Uri::class.java).orEmpty())
             }
             Intent.ACTION_PROCESS_TEXT -> once { send(i.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT), null, emptyList()) }
+            else -> if (!clipboard) finish()
         }
     }
 
     // The clipboard can only be read once the window has focus.
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && intent.action == null) once { sendClipboard(auto = false) }
+        if (hasFocus && clipboard) once { sendClipboard(auto = false) }
     }
 
     private fun once(block: suspend () -> Unit) {
@@ -192,7 +202,7 @@ class SendTile : TileService() {
     }
 
     override fun onClick() {
-        val intent = Intent(this, SendActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val intent = sendClipboardIntent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (Build.VERSION.SDK_INT >= 34) {
             startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE))
         } else {
