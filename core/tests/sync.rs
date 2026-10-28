@@ -397,6 +397,32 @@ async fn joining_a_device_that_has_many_others() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_resend_cut_off_keeps_the_files_we_have() {
+    let (a, mut b, _da, db) = two().await;
+    let src = tempdir().unwrap();
+    let path = src.path().join("big.bin");
+    std::fs::write(&path, vec![5u8; 20_000_000]).unwrap();
+    let file = || File {
+        name: "big.bin".into(),
+        path: path.to_string_lossy().into_owned(),
+        size: 0,
+    };
+    a.node.copy(vec![], vec![file()]).await.unwrap();
+    let got = next(&mut b.clips).await;
+    a.node.copy(text("other"), vec![]).await.unwrap();
+    next(&mut b.clips).await;
+    // A sends the same item again, and goes away halfway.
+    a.node.copy(vec![], vec![file()]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    a.node.stop().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(b.node.history().iter().any(|c| c.id == got.id));
+    assert_eq!(std::fs::metadata(&got.files[0].path).unwrap().len(), 20_000_000);
+    // Nothing is left over from the transfer that failed.
+    assert_eq!(std::fs::read_dir(db.path().join("files")).unwrap().count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn paused_sends_and_takes_nothing() {
     let (mut a, mut b, _da, _db) = two().await;
     a.node.set_paused(true);

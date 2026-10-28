@@ -382,14 +382,27 @@ impl Inner {
             h.update(&data);
             formats.push(Format { mime: f.mime, data });
         }
+        // Files arrive in a folder of their own and move to `dir` once they match the id, so a transfer that fails,
+        // or runs at the same time, never touches the files of the same item that the history points to.
         let dir = self.dir.join("files").join(&m.id);
-        let files = match receive_files(&mut recv, &mut h, &dir, m.files).await {
+        let part = self
+            .dir
+            .join("files")
+            .join(format!("{}.{:x}", m.id, rand::random::<u64>()));
+        let files = match receive_files(&mut recv, &mut h, &part, &dir, m.files).await {
             Ok(files) if h.finalize().to_hex().as_str() == m.id => files,
             _ => {
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                let _ = tokio::fs::remove_dir_all(&part).await;
                 return Err(net("the item didn't match its id"));
             }
         };
+        if !files.is_empty() {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            // If another transfer of this item got there first, keep its files: they're the same.
+            if tokio::fs::rename(&part, &dir).await.is_err() {
+                let _ = tokio::fs::remove_dir_all(&part).await;
+            }
+        }
         let clip = Clip {
             id: m.id,
             from: from.to_string(),
@@ -779,10 +792,12 @@ async fn send_clip(conn: &Connection, clip: &Clip, latest: bool) -> Result<(), E
     send.finish().map_err(net)
 }
 
-/// Saves an item's files to `dir` as they arrive, adding them to the item id.
+/// Saves an item's files to `tmp` as they arrive, adding them to the item id. Their paths are in `dir`, where the
+/// caller moves them.
 async fn receive_files(
     recv: &mut RecvStream,
     h: &mut blake3::Hasher,
+    tmp: &Path,
     dir: &Path,
     parts: Vec<FilePart>,
 ) -> Result<Vec<File>, Error> {
@@ -790,14 +805,14 @@ async fn receive_files(
     let mut names = HashSet::new();
     let mut buf = vec![0; 64 * 1024];
     for (i, part) in parts.into_iter().enumerate() {
-        tokio::fs::create_dir_all(dir).await.map_err(io)?;
+        tokio::fs::create_dir_all(tmp).await.map_err(io)?;
         // Ignoring case, as on macOS, where "A" and "a" are the same file.
         let mut name = store::safe_name(&part.name);
         while !names.insert(name.to_lowercase()) {
             name = format!("{i}-{name}");
         }
         let path = dir.join(&name);
-        let mut out = tokio::fs::File::create(&path).await.map_err(io)?;
+        let mut out = tokio::fs::File::create(tmp.join(&name)).await.map_err(io)?;
         hash_part(h, &part.name, part.size);
         let mut left = part.size;
         while left > 0 {
