@@ -214,6 +214,9 @@ private fun HistoryRow(clip: Clip) {
     ListItem(
         headlineContent = { Text(clip.preview(), maxLines = 2, overflow = TextOverflow.Ellipsis) },
         supportingContent = { Text(from ?: "Another device") },
+        trailingContent = if (clip.files.isEmpty()) null else {
+            { TextButton({ Shared.scope.launch { context.saveDownloads(clip.files) } }) { Text("Save") } }
+        },
         modifier = Modifier.clickable(onClickLabel = "Copy") {
             Shared.scope.launch { runCatching { context.writeClip(clip) }.onFailure { context.toast("Couldn't copy it") } }
         },

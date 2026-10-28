@@ -41,7 +41,10 @@ private const val SENSITIVE = "android.content.extra.IS_SENSITIVE"
 // ClipDescription.EXTRA_IS_REMOTE_DEVICE: tells Android 13+ the item came from another device.
 private const val REMOTE = "android.content.extra.IS_REMOTE_DEVICE"
 
-/** Puts an item from another device on the clipboard: text and HTML as they are, images and files as URIs. */
+/**
+ * Puts an item from another device on the clipboard: text and HTML as they are, images and files as URIs. Files are
+ * shared from where the core keeps them; they go to Downloads only when the user asks ([saveDownloads]).
+ */
 suspend fun Context.writeClip(clip: Clip) {
     val html = clip.formats.firstOrNull { it.mime == "text/html" }?.data?.decodeToString()
     val text = clip.formats.firstOrNull { it.mime.startsWith("text/plain") }?.data?.decodeToString()
@@ -49,7 +52,7 @@ suspend fun Context.writeClip(clip: Clip) {
     // The formats are versions of the same item, so one image is enough.
     val image = clip.formats.firstOrNull { it.mime.startsWith("image/") }
     val uris = withContext(Dispatchers.IO) {
-        listOfNotNull(image?.let { saveImage(clip.id, it) }) + clip.files.mapNotNull { saveDownload(it) }
+        listOfNotNull(image?.let { saveImage(clip.id, it) }) + clip.files.map { shareUri(File(it.path)) }
     }
     val data = when {
         text != null && html != null -> ClipData.newHtmlText(LABEL, text, html)
@@ -67,22 +70,41 @@ private fun Context.saveImage(id: String, image: Format): Uri {
     val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(image.mime) ?: "img"
     val file = File(File(cacheDir, "clips").apply { mkdirs() }, "${id.filter { it.isLetterOrDigit() }.take(16)}.$ext")
     file.writeBytes(image.data)
-    return FileProvider.getUriForFile(this, "$packageName.files", file)
+    return shareUri(file)
 }
 
-/** Copies a received file into Downloads. */
-private fun Context.saveDownload(file: ClipFile): Uri? = try {
-    val values = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-        put(MediaStore.MediaColumns.IS_PENDING, 1)
-    }
-    contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)?.also { uri ->
+/** A URI other apps can read [file] through, from the folders in res/xml/file_paths.xml. */
+private fun Context.shareUri(file: File): Uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+
+/** Copies an item's files into Downloads, when the user asks. */
+suspend fun Context.saveDownloads(files: List<ClipFile>) {
+    val failed = withContext(Dispatchers.IO) { files.count { !saveDownload(it) } }
+    toast(if (failed == 0) "Saved to Downloads" else "Couldn't save $failed of ${files.size} to Downloads")
+}
+
+/** Copies a received file into Downloads, unless the same name and size is already there from an earlier save. */
+private fun Context.saveDownload(file: ClipFile): Boolean = try {
+    val downloads = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+    val size = File(file.path).length()
+    // Without storage permission, this only finds files we saved ourselves.
+    val saved = contentResolver.query(
+        downloads, arrayOf(MediaStore.MediaColumns._ID),
+        "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.SIZE} = ?",
+        arrayOf(file.name, size.toString()), null,
+    )?.use { it.moveToFirst() } == true
+    if (!saved) {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(downloads, values)!!
         contentResolver.openOutputStream(uri)!!.use { out -> File(file.path).inputStream().use { it.copyTo(out) } }
         contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
     }
+    true
 } catch (e: Exception) {
     Log.e("SharedClip", "Couldn't save ${file.name} to Downloads", e)
-    null
+    false
 }
 
 /**
