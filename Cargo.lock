@@ -3121,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "sharedclip-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -3140,7 +3140,7 @@ dependencies = [
 
 [[package]]
 name = "sharedclip-linux"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "bluer",
  "futures-util",
