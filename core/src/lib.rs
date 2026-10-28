@@ -166,7 +166,10 @@ impl Node {
     }
 
     /// The local clipboard changed. Sends the item to the paired devices, unless it's one of the last 8 the core gave
-    /// the app (`Events::on_clip`, `fetch`). Leave out password-manager items before calling this; the core sends all it gets.
+    /// the app (`Events::on_clip`, `fetch`). Leave out password-manager items before calling this; the core sends
+    /// all it gets. Returns once each connected device has it (or turned it down, or went away), or with
+    /// `Error::Network` after 30 s plus 1 s per MB while the sends go on: don't hold up the clipboard watcher on it.
+    /// Items go into the history in the order the calls start.
     pub async fn copy(&self, formats: Vec<Format>, files: Vec<File>) -> Result<(), Error> {
         self.inner.copy(formats, files).await
     }

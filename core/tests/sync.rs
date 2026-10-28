@@ -221,6 +221,24 @@ async fn echo_is_not_sent_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn copy_returns_once_the_device_has_it() {
+    let (a, mut b, _da, _db) = two().await;
+    let src = tempdir().unwrap();
+    let path = src.path().join("big.bin");
+    std::fs::write(&path, vec![3u8; 10_000_000]).unwrap();
+    let file = File {
+        name: "big.bin".into(),
+        path: path.to_string_lossy().into_owned(),
+        size: 0,
+    };
+    a.node.copy(vec![], vec![file]).await.unwrap();
+    // A goes away right after: B has it all already.
+    a.node.stop().await;
+    let clip = next(&mut b.clips).await;
+    assert_eq!(std::fs::metadata(&clip.files[0].path).unwrap().len(), 10_000_000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn late_echoes_are_not_sent_back() {
     let (mut a, mut b, _da, _db) = two().await;
     a.node.copy(text("x"), vec![]).await.unwrap();

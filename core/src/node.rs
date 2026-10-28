@@ -56,6 +56,8 @@ pub struct Inner {
     /// The runtime `start` ran on; sync methods spawn their work here.
     rt: tokio::runtime::Handle,
     state: Mutex<State>,
+    /// Held while `copy` adds an item to the history, so items go in the order the calls start.
+    copying: tokio::sync::Mutex<()>,
     /// Held while writing the state's files, so the last write has the newest state.
     saving: Mutex<()>,
 }
@@ -153,6 +155,7 @@ impl Inner {
             dir,
             rt,
             state: Mutex::new(state),
+            copying: tokio::sync::Mutex::new(()),
             saving: Mutex::new(()),
         });
         inner.spawn(inner.clone().accept_loop());
@@ -659,6 +662,9 @@ impl Inner {
     }
 
     pub async fn copy(self: &Arc<Self>, formats: Vec<Format>, mut files: Vec<File>) -> Result<(), Error> {
+        // Copies go into the history in the order the calls start (the lock is fair), even if one takes longer to
+        // read its files.
+        let in_order = self.copying.lock().await;
         let mut h = blake3::Hasher::new();
         for f in &formats {
             hash_part(&mut h, &f.mime, f.data.len() as u64);
@@ -669,7 +675,7 @@ impl Inner {
         }
         let id = h.finalize().to_hex().to_string();
         {
-            let mut s = self.lock();
+            let s = self.lock();
             if s.paused || s.delivered.contains(&id) {
                 return Ok(());
             }
@@ -704,16 +710,28 @@ impl Inner {
                 .collect();
             (targets, forgotten)
         };
+        drop(in_order);
         self.save_history(forgotten);
         // Each send streams the data from disk, so sending to many devices doesn't copy it in memory.
+        let limit = transfer_limit(meta.size());
         let meta = Arc::new(meta);
-        for (conn, metered) in targets {
-            let (dir, meta) = (self.dir.clone(), meta.clone());
-            self.spawn(async move {
-                let _ = send_item(&conn, &dir, &meta, metered, false).await;
-            });
-        }
-        Ok(())
+        let sends: Vec<_> = targets
+            .into_iter()
+            .map(|(conn, metered)| {
+                let (dir, meta) = (self.dir.clone(), meta.clone());
+                self.rt
+                    .spawn(async move { send_item(&conn, &dir, &meta, metered, false).await })
+            })
+            .collect();
+        // Wait until each device has it, turned it down or went away. Sends still running after the limit go on.
+        let all = async {
+            for send in sends {
+                let _ = send.await;
+            }
+        };
+        tokio::time::timeout(limit, all)
+            .await
+            .map_err(|_| net("not every device has it yet"))
     }
 
     pub async fn fetch(self: &Arc<Self>, id: &str) -> Result<Clip, Error> {
@@ -735,8 +753,7 @@ impl Inner {
             s.fetches.entry(id.to_string()).or_default().push(tx);
             (rx, conn, size)
         };
-        // ponytail: one timeout for the whole transfer (30 s plus 1 s per MB); per-chunk progress would be tighter.
-        let limit = Duration::from_secs(30 + size / 1_000_000);
+        let limit = transfer_limit(size);
         let res = async {
             send_msg(&conn, &Msg::Request { id: id.to_string() }).await?;
             // The answer comes on this connection; if it closes, it won't come.
@@ -924,7 +941,16 @@ async fn send_clip(conn: &Connection, dir: &Path, meta: &Meta, latest: bool) -> 
             return Err(io("a file changed while sending"));
         }
     }
-    send.finish().map_err(net)
+    send.finish().map_err(net)?;
+    // Done when the device has it all (or turned it down).
+    send.stopped().await.map_err(net)?;
+    Ok(())
+}
+
+/// How long a whole transfer of `size` bytes may take: 30 s plus 1 s per MB.
+// ponytail: one timeout for the whole transfer; per-chunk progress would be tighter.
+fn transfer_limit(size: u64) -> Duration {
+    Duration::from_secs(30 + size / 1_000_000)
 }
 
 /// Saves an item's formats to `path` as they arrive, adding them to the item id. Returns the start of its plain text.

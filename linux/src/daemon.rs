@@ -193,8 +193,17 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
     let n = node.clone();
     tokio::spawn(async move {
         while let Some((formats, files)) = rx.recv().await {
-            if let Err(err) = n.copy(formats, files).await {
-                eprintln!("send: {err}");
+            let n = n.clone();
+            let mut copy = Box::pin(async move {
+                if let Err(err) = n.copy(formats, files).await {
+                    eprintln!("send: {err}");
+                }
+            });
+            // `copy` waits until the devices have it: start it here, so it keeps its place in line, then let it
+            // finish on its own while the next item goes.
+            let started = std::future::poll_fn(|cx| std::task::Poll::Ready(copy.as_mut().poll(cx))).await;
+            if started.is_pending() {
+                tokio::spawn(copy);
             }
         }
     });
