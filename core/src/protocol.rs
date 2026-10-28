@@ -30,6 +30,9 @@ pub enum Msg {
     Request {
         id: String,
     },
+    Missing {
+        id: String,
+    },
     Peers {
         devices: Vec<PeerInfo>,
     },

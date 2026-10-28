@@ -43,7 +43,8 @@ apps can add things without breaking older ones.
 | `hello` | `name`, `platform`, `protocol`, `features` (list) | none | Sent first by both sides on every connection. May be sent again at any time; it replaces the earlier one |
 | `clip` | `id`, `time_ms`, `formats`: [{`mime`, `size`}], `files`: [{`name`, `size`}], `latest` (optional) | the formats' data in order, then the files' data in order | A clipboard item |
 | `offer` | `id`, `time_ms`, `size`, `mimes`, `file_names`, `latest` (optional) | none | An item that wasn't sent: too big, or the receiver is on mobile data |
-| `request` | `id` | none | Send me this item; answered with a `clip` |
+| `request` | `id` | none | Send me this item; answered with a `clip`, or `missing` |
+| `missing` | `id` | none | Answers a `request` for an item the device doesn't have (any more), or while it's paused, so the asking device stops waiting |
 | `peers` | `devices`: [{`id`, `name`, `platform`, `addrs`}] | none | These devices are paired with me; trust them too |
 | `unpair` | `id` | none | Forget device `id`. If `id` is the sender, it forgot you. One naming the receiver is ignored |
 

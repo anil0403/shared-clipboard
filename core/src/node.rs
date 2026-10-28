@@ -77,7 +77,7 @@ pub struct State {
     /// Offers we got, newest first: (item id, device that has it, size).
     offers: VecDeque<(String, String, u64)>,
     /// `fetch` calls waiting for an item to be in the history.
-    fetches: HashMap<String, Vec<oneshot::Sender<()>>>,
+    fetches: HashMap<String, Vec<oneshot::Sender<Result<(), Error>>>>,
     metered: bool,
     pub paused: bool,
     pub link: Option<Link>,
@@ -344,6 +344,7 @@ impl Inner {
             Msg::Clip(m) => self.on_clip(from, recv, m).await?,
             Msg::Offer(m) => self.on_offer(from, m),
             Msg::Request { id } => self.on_request(from, &id),
+            Msg::Missing { id } => self.on_missing(from, &id),
             Msg::Peers { devices } => self.on_peers(devices),
             Msg::Unpair { id } => {
                 // `id` is another device to forget, or the sender itself: it forgot us.
@@ -394,7 +395,17 @@ impl Inner {
         }
     }
 
-    async fn on_clip(self: &Arc<Self>, from: &str, mut recv: RecvStream, m: ClipMsg) -> Result<(), Error> {
+    async fn on_clip(self: &Arc<Self>, from: &str, recv: RecvStream, m: ClipMsg) -> Result<(), Error> {
+        let id = m.id.clone();
+        let res = self.receive_clip(from, recv, m).await;
+        if res.is_err() {
+            // A `fetch` waiting for it fails now, not at its timeout.
+            self.lock().fetches.remove(&id);
+        }
+        res
+    }
+
+    async fn receive_clip(self: &Arc<Self>, from: &str, mut recv: RecvStream, m: ClipMsg) -> Result<(), Error> {
         if !valid_id(&m.id) {
             return Err(net("bad item id"));
         }
@@ -479,7 +490,7 @@ impl Inner {
         self.save_history(forgotten);
         match waiters {
             // Each `fetch` reads it from disk itself.
-            Some(waiters) => waiters.into_iter().for_each(|w| _ = w.send(())),
+            Some(waiters) => waiters.into_iter().for_each(|w| _ = w.send(Ok(()))),
             None => self.events.on_clip(store::load_item(&self.dir, &meta).await?),
         }
         Ok(())
@@ -507,18 +518,32 @@ impl Inner {
         self.events.on_offer(offer);
     }
 
+    /// Sends the item asked for, or `missing` if we don't have it or are paused.
     fn on_request(&self, from: &str, id: &str) {
-        let found = {
+        let (meta, conn) = {
             let s = self.lock();
-            let meta = s.history.iter().find(|h| h.id == id).filter(|_| !s.paused);
-            meta.zip(s.conns.get(from))
-                .map(|(meta, c)| (meta.clone(), c.conn.clone()))
+            let meta = s.history.iter().find(|h| h.id == id).filter(|_| !s.paused).cloned();
+            let Some(conn) = s.conns.get(from).map(|c| c.conn.clone()) else {
+                return;
+            };
+            (meta, conn)
         };
-        if let Some((meta, conn)) = found {
-            let dir = self.dir.clone();
-            self.spawn(async move {
-                let _ = send_clip(&conn, &dir, &meta, false).await;
-            });
+        let (dir, id) = (self.dir.clone(), id.to_string());
+        self.spawn(async move {
+            let _ = match meta {
+                Some(meta) => send_clip(&conn, &dir, &meta, false).await,
+                None => send_msg(&conn, &Msg::Missing { id }).await,
+            };
+        });
+    }
+
+    /// The device we asked for an item doesn't have it: its `fetch` calls fail now.
+    fn on_missing(&self, from: &str, id: &str) {
+        let mut s = self.lock();
+        if s.offers.iter().any(|o| o.0 == id && o.1 == from)
+            && let Some(waiters) = s.fetches.remove(id)
+        {
+            waiters.into_iter().for_each(|w| _ = w.send(Err(Error::NotFound)));
         }
     }
 
@@ -716,13 +741,24 @@ impl Inner {
             send_msg(&conn, &Msg::Request { id: id.to_string() }).await?;
             // The answer comes on this connection; if it closes, it won't come.
             tokio::select! {
-                got = tokio::time::timeout(limit, rx) => got.map_err(net)?.map_err(net),
+                got = tokio::time::timeout(limit, rx) => match got {
+                    Err(_) => Err(net("timed out")),
+                    Ok(Err(_)) => Err(net("the transfer failed")),
+                    Ok(Ok(res)) => res,
+                },
                 e = conn.closed() => Err(net(e)),
             }
         };
         let res = res.await;
         if res.is_err() {
-            self.lock().fetches.remove(id);
+            // Only this call gave up; others waiting for the same item keep waiting.
+            let mut s = self.lock();
+            if let Some(waiters) = s.fetches.get_mut(id) {
+                waiters.retain(|w| !w.is_closed());
+                if waiters.is_empty() {
+                    s.fetches.remove(id);
+                }
+            }
         }
         res?;
         self.item(id).await

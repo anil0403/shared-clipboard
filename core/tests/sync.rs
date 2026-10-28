@@ -279,13 +279,25 @@ async fn fetch_fails_when_the_device_goes_away() {
     a.node.copy(big, vec![]).await.unwrap();
     let offer = next(&mut b.offers).await;
 
-    // A doesn't answer (it's paused), then goes away while B waits.
-    a.node.set_paused(true);
+    // A goes away while it sends.
     let node = b.node.clone();
     let fetch = tokio::spawn(async move { node.fetch(offer.id).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
     a.node.stop().await;
     assert!(within(fetch).await.unwrap().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_fails_at_once_when_the_device_is_paused() {
+    let (a, mut b, _da, _db) = two().await;
+    let big = vec![Format {
+        mime: "application/octet-stream".into(),
+        data: vec![8; SIZE_CAP as usize + 1],
+    }];
+    a.node.copy(big, vec![]).await.unwrap();
+    let offer = next(&mut b.offers).await;
+    a.node.set_paused(true);
+    let fetch = tokio::time::timeout(Duration::from_secs(5), b.node.fetch(offer.id)).await;
+    assert!(matches!(fetch, Ok(Err(Error::NotFound))));
 }
 
 /// B found A through discovery and pairs by comparing codes.
