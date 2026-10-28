@@ -253,6 +253,23 @@ async fn big_items_are_offered_then_fetched() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn found_keeps_a_working_connection() {
+    let (a, mut b, _da, _db) = two().await;
+    let big = vec![Format {
+        mime: "application/octet-stream".into(),
+        data: vec![9; SIZE_CAP as usize + 1],
+    }];
+    a.node.copy(big, vec![]).await.unwrap();
+    let offer = next(&mut b.offers).await;
+    let node = b.node.clone();
+    let fetch = tokio::spawn(async move { node.fetch(offer.id).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Discovery reports A at an address B didn't have (loopback; the link had A's network addresses).
+    b.node.found(a.id.clone(), format!("127.0.0.1:{}", a.node.port()));
+    assert!(within(fetch).await.unwrap().is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fetch_fails_when_the_device_goes_away() {
     let (a, mut b, _da, _db) = two().await;
     let big = vec![Format {

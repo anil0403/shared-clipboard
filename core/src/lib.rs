@@ -159,8 +159,8 @@ impl Node {
         self.inner.port
     }
 
-    /// Discovery found device `id` at `addr` (e.g. "192.168.1.5:47820"). Connects if it's paired; remembers the
-    /// address for `pair_device` if not.
+    /// Discovery found device `id` at `addr` (e.g. "192.168.1.5:47820"). Connects if it's paired and not connected;
+    /// remembers the address for later, or for `pair_device` if it isn't paired.
     pub fn found(&self, id: String, addr: String) {
         self.inner.found(&id, &addr)
     }

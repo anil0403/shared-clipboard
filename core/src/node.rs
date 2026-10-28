@@ -613,10 +613,12 @@ impl Inner {
             let mut s = self.lock();
             let s = &mut *s;
             match s.peers.get_mut(&id) {
-                Some(peer) => {
-                    let new = remember(&mut peer.addrs, addr);
-                    (new, new || !s.conns.contains_key(&id))
-                }
+                // Connected: only remember the address. Dialing would replace a working connection (the duplicate
+                // rule), cutting off what's on it.
+                Some(peer) => (
+                    remember(&mut peer.addrs, addr),
+                    s.conns.get(&id).is_none_or(|c| c.conn.close_reason().is_some()),
+                ),
                 None => {
                     remember(s.found.entry(id.clone()).or_default(), addr);
                     (false, false)
