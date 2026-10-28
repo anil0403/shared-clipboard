@@ -209,7 +209,16 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
 
     let a = app.clone();
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        loop {
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(err) => {
+                    // Out of file descriptors, say: wait and try again.
+                    eprintln!("control socket: {err}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             let a = a.clone();
             tokio::spawn(async move {
                 if let Err(err) = handle(&a, stream).await {
