@@ -28,7 +28,7 @@ struct ContentView: View {
                 } footer: {
                     if let message = model.message { Text(message) }
                 }
-                Section("Devices") {
+                Section {
                     if model.devices.isEmpty {
                         Text("No paired devices yet. Tap Pair.")
                     }
@@ -38,6 +38,13 @@ struct ContentView: View {
                     .onDelete { rows in
                         let ids = rows.map { model.devices[$0].id }
                         Task { for id in ids { await model.unpair(id) } }
+                    }
+                } header: {
+                    HStack {
+                        Text("Devices")
+                        Spacer()
+                        NavigationLink("Pair") { PairingView() }
+                            .textCase(nil)
                     }
                 }
                 if !model.offers.isEmpty {
@@ -68,9 +75,6 @@ struct ContentView: View {
                 Toggle("Pause", isOn: $model.paused)
             }
             .navigationTitle("Shared Clipboard")
-            .toolbar {
-                NavigationLink("Pair") { PairingView() }
-            }
         }
         // iOS stops the app's connections in the background: start over whenever it comes back, and sync the
         // clipboard both ways.
