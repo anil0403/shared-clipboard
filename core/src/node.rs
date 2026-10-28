@@ -108,6 +108,10 @@ impl Inner {
         let rt = tokio::runtime::Handle::try_current().map_err(|_| io("start must run on a tokio runtime"))?;
         let dir = PathBuf::from(&config.data_dir);
         std::fs::create_dir_all(&dir).map_err(io)?;
+        // Only this user may read the key, paired devices and history. Best effort: an iOS App Group container may
+        // not allow it, and the sandbox guards it there anyway.
+        #[cfg(unix)]
+        let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         let key = store::load_key(&dir)?;
         let ep = match bind(key.clone(), if config.port == 0 { DEFAULT_PORT } else { config.port }).await {
             Err(_) if config.port == 0 => bind(key, 0).await?,

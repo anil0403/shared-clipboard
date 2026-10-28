@@ -438,6 +438,19 @@ async fn paused_sends_and_takes_nothing() {
     assert_eq!(next(&mut b.clips).await.formats, text("sent"));
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_data_folder_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let a = start(&dir, "A").await;
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    a.node.stop().await;
+}
+
 /// A port nothing listens on right now.
 fn free_port() -> u16 {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
