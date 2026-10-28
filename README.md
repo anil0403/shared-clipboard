@@ -13,6 +13,23 @@ same network (with or without internet). Bluetooth and the internet (with accoun
 - **macOS and iOS apps:** written; compiled only by CI on a Mac.
 - **Bluetooth and accounts:** not started.
 
+## Install
+
+From [Releases](https://github.com/anil0403/shared-clipboard/releases):
+
+- **Linux:** `sharedclip-<version>-x86_64-linux.tar.gz`. Unpack it, then:
+  ```sh
+  install -Dm755 sharedclip ~/.local/bin/sharedclip
+  install -Dm644 sharedclip.service ~/.config/systemd/user/sharedclip.service
+  systemctl --user enable --now sharedclip
+  ```
+- **Android:** `sharedclip-<version>-android.apk`. Open it on the phone and allow installing from that app when
+  asked. A newer APK installs over it and keeps the paired devices.
+
+Every file is signed with [minisign](https://jedisct1.github.io/minisign/). To check one:
+`minisign -Vm <file> -p minisign.pub` (the key is [`minisign.pub`](minisign.pub)). `SHA256SUMS` lists their
+checksums.
+
 ## Layout
 
 | Path | What's there |

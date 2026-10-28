@@ -5,6 +5,8 @@ the same network. It needs a compositor with `ext-data-control-v1` or `wlr-data-
 Sway, Hyprland, COSMIC and niri have it; GNOME doesn't.
 
 ## Install
+A release has `sharedclip` and `sharedclip.service` ready to install: see the [main README](../README.md#install).
+To build it yourself:
 ```sh
 cargo build --release -p sharedclip-linux
 install -Dm755 target/release/sharedclip ~/.local/bin/sharedclip
