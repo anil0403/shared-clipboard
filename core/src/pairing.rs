@@ -194,9 +194,14 @@ pub async fn respond(inner: Arc<Inner>, conn: Connection, addr: Option<SocketAdd
     let Ok(Ok((mut send, mut recv))) = timeout(STEP_TIMEOUT, conn.accept_bi()).await else {
         return;
     };
-    let peer = match Busy::start(&inner) {
-        Ok(_busy) => check(&inner, &conn, addr, &mut send, &mut recv).await.ok().flatten(),
-        Err(_) => None,
+    // Read the first message before taking the pairing slot, so a device that says nothing doesn't hold it.
+    let first = step(&mut recv).await;
+    let peer = match (first, Busy::start(&inner)) {
+        (Ok(first), Ok(_busy)) => check(&inner, &conn, addr, first, &mut send, &mut recv)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
     };
     let reply = match &peer {
         Some(peer) => {
@@ -231,6 +236,7 @@ async fn check(
     inner: &Inner,
     conn: &Connection,
     addr: Option<SocketAddr>,
+    first: PairMsg,
     send: &mut SendStream,
     recv: &mut RecvStream,
 ) -> Result<Option<PeerInfo>, Error> {
@@ -241,9 +247,11 @@ async fn check(
         platform,
         addrs: addr.iter().map(|a| a.to_string()).collect(),
     };
-    match step(recv).await? {
+    match first {
         PairMsg::Pair { secret, name, platform } => Ok(take_link(inner, &secret).then(|| peer(name, platform))),
-        PairMsg::PairCode { commit, name, platform } => {
+        // Only while this device shows a pairing link (its pair screen is open), so a stranger on the network can't
+        // pop up pairing prompts, or hold the one pairing slot, whenever they like.
+        PairMsg::PairCode { commit, name, platform } if link_open(inner) => {
             let nonce_a: [u8; 32] = rand::random();
             let nonce = HEXLOWER.encode(&nonce_a);
             write_frame(
@@ -288,6 +296,10 @@ fn take_link(inner: &Inner, secret: &str) -> bool {
         s.link = None;
     }
     ok
+}
+
+fn link_open(inner: &Inner) -> bool {
+    inner.lock().link.as_ref().is_some_and(|l| l.expires > Instant::now())
 }
 
 /// Compares in constant time, so the time to answer doesn't give the secret away.

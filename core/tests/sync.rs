@@ -242,6 +242,8 @@ async fn code_pairing(accept_on_a: bool) -> (Dev, Dev, Result<Device, Error>, [T
     let mut a = start(da.path(), "A").await;
     let mut b = start(db.path(), "B").await;
     b.node.found(a.id.clone(), format!("127.0.0.1:{}", a.node.port()));
+    // A's user opened the pair screen.
+    a.node.pairing_link();
     let (node, id) = (b.node.clone(), a.id.clone());
     let pairing = tokio::spawn(async move { node.pair_device(id).await });
 
@@ -271,6 +273,18 @@ async fn code_pairing_rejected() {
     assert!(matches!(result, Err(Error::PairingRejected)));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(a.node.devices().is_empty() && b.node.devices().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_pairing_needs_the_pair_screen_open() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let mut a = start(da.path(), "A").await;
+    let b = start(db.path(), "B").await;
+    b.node.found(a.id.clone(), format!("127.0.0.1:{}", a.node.port()));
+    let result = within(b.node.pair_device(a.id.clone())).await;
+    assert!(matches!(result, Err(Error::PairingRejected)));
+    // A's user was never asked.
+    assert!(a.codes.try_recv().is_err());
 }
 
 async fn three() -> (Dev, Dev, Dev, [TempDir; 3]) {

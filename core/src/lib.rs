@@ -173,7 +173,8 @@ impl Node {
     }
 
     /// A link to show as a QR code: this device's id, addresses and a one-time secret, valid for 10 minutes.
-    /// A new link replaces the previous one.
+    /// A new link replaces the previous one. Call it when the pair screen opens: while a link is valid, this device
+    /// also answers code pairing (`pair_device` on another device); otherwise it refuses it without asking.
     pub fn pairing_link(&self) -> String {
         pairing::link(&self.inner)
     }
@@ -183,7 +184,8 @@ impl Node {
         pairing::pair_link(&self.inner, &link).await
     }
 
-    /// Pairs with a device found by discovery, comparing a 6-digit code (`Events::on_pairing_code`).
+    /// Pairs with a device found by discovery, comparing a 6-digit code (`Events::on_pairing_code`). The other
+    /// device must have its pair screen open (`pairing_link`).
     pub async fn pair_device(&self, id: String) -> Result<Device, Error> {
         pairing::pair_device(&self.inner, &id).await
     }

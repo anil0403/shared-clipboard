@@ -89,7 +89,8 @@ reached A. A device handles one pairing at a time; another one meanwhile gets `r
 3. Both save each other. B also trusts the listed devices. A sends `peers` with B to its other paired devices.
 
 ### With a code (two devices without a camera)
-B found A through discovery and connects.
+B found A through discovery and connects. A answers only while it shows a pairing link (its pair screen is open);
+otherwise it replies `rejected` at once, without asking its user, so a stranger can't pop up prompts.
 
 1. B → A: `{"type":"pair-code","commit":<hex BLAKE3 of nonce_b>,"name":…,"platform":…}`
 2. A → B: `{"type":"nonce","nonce":<nonce_a, hex, 32 random bytes>,"name":…,"platform":…}`
