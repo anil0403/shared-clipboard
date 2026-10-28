@@ -15,6 +15,9 @@ use wl_clipboard_rs::watch::{ClipboardEvent, ClipboardType, Watcher};
 
 /// Password managers (KeePassXC, KDE's) offer this type, set to `secret`, with a password.
 const SECRET: &str = "x-kde-passwordManagerHint";
+/// Besides text, the types we put on the clipboard from another device. Others are dropped: `text/uri-list` or
+/// `x-special/gnome-copied-files` from a peer could make a paste move or open local files.
+const ALLOWED: [&str; 3] = ["text/html", "image/png", "image/jpeg"];
 /// The text types we offer for a text item.
 const TEXT: [&str; 5] = [
     "text/plain;charset=utf-8",
@@ -129,7 +132,7 @@ fn offer(formats: &[Format], files: &[File]) -> Vec<(String, Vec<u8>)> {
     for f in formats {
         if f.mime.starts_with("text/plain") {
             TEXT.iter().for_each(|m| add(m, &f.data));
-        } else {
+        } else if ALLOWED.contains(&f.mime.as_str()) {
             add(&f.mime, &f.data);
         }
     }
@@ -352,6 +355,47 @@ mod tests {
         assert_eq!(
             read_back(&offered),
             [fmt("text/plain", "hi"), fmt("text/html", "<b>hi</b>")]
+        );
+    }
+
+    #[test]
+    fn peers_cant_set_file_types() {
+        let mimes = |formats: &[Format], files: &[File]| -> Vec<(String, String)> {
+            offer(formats, files)
+                .into_iter()
+                .map(|(m, d)| (m, String::from_utf8(d).unwrap()))
+                .filter(|(m, _)| !TEXT.contains(&m.as_str()))
+                .collect()
+        };
+        let incoming = [
+            fmt("x-special/gnome-copied-files", "cut\nfile:///home/u/Documents"),
+            fmt("text/uri-list", "file:///home/u/Documents\r\n"),
+            fmt("application/x-evil", "?"),
+            fmt("text/plain", "hi"),
+            fmt("text/html", "<b>hi</b>"),
+            fmt("image/png", "png"),
+            fmt("image/jpeg", "jpg"),
+        ];
+        let kept = ["text/html", "image/png", "image/jpeg"];
+        assert_eq!(
+            mimes(&incoming, &[])
+                .iter()
+                .map(|(m, _)| m.as_str())
+                .collect::<Vec<_>>(),
+            kept
+        );
+
+        // With files, the file types are made here from the files.
+        let file = File {
+            name: "a".into(),
+            path: "/tmp/a".into(),
+            size: 1,
+        };
+        let got = mimes(&incoming, &[file]);
+        assert_eq!(got[3], ("text/uri-list".into(), "file:///tmp/a\r\n".into()));
+        assert_eq!(
+            got[4],
+            ("x-special/gnome-copied-files".into(), "copy\nfile:///tmp/a".into())
         );
     }
 
