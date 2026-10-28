@@ -167,6 +167,26 @@ async fn link_pairing_then_items_arrive() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn files_with_clashing_names_all_arrive() {
+    let (a, mut b, _da, _db) = two().await;
+    let src = tempdir().unwrap();
+    let files = ["2-a", "a", "a", "A"].iter().enumerate().map(|(i, name)| {
+        let path = src.path().join(i.to_string());
+        std::fs::write(&path, format!("body {i}")).unwrap();
+        File {
+            name: name.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            size: 0,
+        }
+    });
+    a.node.copy(vec![], files.collect()).await.unwrap();
+    let clip = next(&mut b.clips).await;
+    for (i, file) in clip.files.iter().enumerate() {
+        assert_eq!(std::fs::read_to_string(&file.path).unwrap(), format!("body {i}"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn echo_is_not_sent_back() {
     let (mut a, mut b, _da, _db) = two().await;
     a.node.copy(text("one"), vec![]).await.unwrap();

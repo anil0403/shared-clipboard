@@ -787,8 +787,9 @@ async fn receive_files(
     let mut buf = vec![0; 64 * 1024];
     for (i, part) in parts.into_iter().enumerate() {
         tokio::fs::create_dir_all(dir).await.map_err(io)?;
+        // Ignoring case, as on macOS, where "A" and "a" are the same file.
         let mut name = store::safe_name(&part.name);
-        if !names.insert(name.clone()) {
+        while !names.insert(name.to_lowercase()) {
             name = format!("{i}-{name}");
         }
         let path = dir.join(&name);
