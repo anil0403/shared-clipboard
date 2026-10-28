@@ -10,7 +10,7 @@ event=${GITHUB_EVENT_NAME:?}
 # A run after CI passed on a push counts as that push.
 [[ $event == workflow_run ]] && event=push
 # Files that change nothing in the apps.
-docs='\.md$|^docs/|^\.github/|^\.trail/|^LICENSE$'
+docs='\.md$|^docs/|^\.github/|^\.trail/|^install\.sh$|^LICENSE$'
 
 # Prints the subjects of the commits in a range that count for a version: not docs:, ci: or test:, and changing more
 # than docs and CI files. Subjects only: bodies can quote other commits.

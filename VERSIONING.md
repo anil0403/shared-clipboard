@@ -171,7 +171,8 @@ or `patch`):
 
 1. `last` = the newest tag that is not a beta (`git describe --tags --abbrev=0 --exclude '*-*'`).
 2. Read the commit **subjects** since `last` (bodies can quote other commits). `docs:`, `ci:` and `test:` commits,
-   and commits that change only docs, `.github/`, `.trail/` or `LICENSE` files, count for nothing.
+   and commits that change only docs, `.github/`, `.trail/`, `install.sh` (it only downloads a release) or `LICENSE`
+   files, count for nothing.
 3. On a push with nothing new that counts since the newest tag (betas included): stop.
 4. If the last CI run (`ci.yml`) on main failed: stop with an error.
 5. Pick the version from the subjects since `last` (`bump` other than `auto` picks the number by hand):
