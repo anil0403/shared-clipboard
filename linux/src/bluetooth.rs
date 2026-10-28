@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bluer::adv::{Advertisement, AdvertisementHandle};
 use bluer::gatt::local::{Application, ApplicationHandle, Characteristic, CharacteristicRead, Service};
-use bluer::l2cap::{SocketAddr, Stream, StreamListener};
+use bluer::l2cap::{SocketAddr, StreamListener};
 use bluer::{Adapter, AdapterEvent, AdapterProperty, ErrorKind, Session, SessionEvent, Uuid};
 use futures_util::StreamExt;
 use sharedclip::Node;
@@ -83,7 +83,11 @@ async fn serve(
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, from)) => on_stream(node, stream, from),
+                // A phone opened a channel: the node runs the link on it.
+                Ok((stream, from)) => {
+                    eprintln!("Bluetooth: channel from {}", from.addr);
+                    node.bluetooth_link(stream, false);
+                }
                 Err(err) => {
                     log.say(format!("Bluetooth: {err}"));
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -150,13 +154,6 @@ async fn listen(adapter: &Adapter) -> Res<(StreamListener, u16)> {
     Err("no free L2CAP PSM".into())
 }
 
-/// A phone opened a channel: the node runs the link on it.
-fn on_stream(node: &Arc<Node>, stream: Stream, from: SocketAddr) {
-    eprintln!("Bluetooth: channel from {}", from.addr);
-    // PLACEHOLDER until the core has it: replace with `node.bluetooth_link(stream, false);`
-    drop((node, stream));
-}
-
 /// Prints each message once, until a different one comes.
 #[derive(Default)]
 struct Log(String);
@@ -167,5 +164,14 @@ impl Log {
             eprintln!("{msg}");
             self.0 = msg;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn uuids_match_the_core() {
+        assert_eq!(super::SERVICE.to_string(), sharedclip::bluetooth_service_uuid());
+        assert_eq!(super::PSM.to_string(), sharedclip::bluetooth_psm_uuid());
     }
 }
