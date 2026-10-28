@@ -617,7 +617,11 @@ impl Inner {
         let limit = Duration::from_secs(30 + size / 1_000_000);
         let res = async {
             send_msg(&conn, &Msg::Request { id: id.to_string() }).await?;
-            tokio::time::timeout(limit, rx).await.map_err(net)?.map_err(net)
+            // The answer comes on this connection; if it closes, it won't come.
+            tokio::select! {
+                clip = tokio::time::timeout(limit, rx) => clip.map_err(net)?.map_err(net),
+                e = conn.closed() => Err(net(e)),
+            }
         };
         let res = res.await;
         if res.is_err() {

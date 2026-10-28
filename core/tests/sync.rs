@@ -197,6 +197,25 @@ async fn big_items_are_offered_then_fetched() {
     assert!(matches!(b.node.fetch("00".repeat(32)).await, Err(Error::NotFound)));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_fails_when_the_device_goes_away() {
+    let (a, mut b, _da, _db) = two().await;
+    let big = vec![Format {
+        mime: "application/octet-stream".into(),
+        data: vec![7; SIZE_CAP as usize + 1],
+    }];
+    a.node.copy(big, vec![]).await.unwrap();
+    let offer = next(&mut b.offers).await;
+
+    // A doesn't answer (it's paused), then goes away while B waits.
+    a.node.set_paused(true);
+    let node = b.node.clone();
+    let fetch = tokio::spawn(async move { node.fetch(offer.id).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.node.stop().await;
+    assert!(within(fetch).await.unwrap().is_err());
+}
+
 /// B found A through discovery and pairs by comparing codes.
 async fn code_pairing(accept_on_a: bool) -> (Dev, Dev, Result<Device, Error>, [TempDir; 2]) {
     let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
