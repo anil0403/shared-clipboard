@@ -21,8 +21,8 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
-import androidx.core.content.edit
 import androidx.core.content.IntentCompat
+import androidx.core.content.edit
 import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Format
 import kotlinx.coroutines.Dispatchers
