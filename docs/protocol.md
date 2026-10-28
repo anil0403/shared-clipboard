@@ -67,8 +67,8 @@ The only feature so far is `metered`: the device is on mobile data. A device sen
   text-direction overrides (they could drive a terminal or disguise the name) and cuts device names to 64 characters.
 - **Limits:** a header is at most 64 KB. A `clip` body bigger than 25 MiB plus 1 MiB is refused, unless it answers a
   `request` (then the offer's size plus 1 MiB). A pairing message is at most 64 KB.
-- **No echo:** when the app reports a clipboard change whose id is the item the core just gave it, the core doesn't
-  send it again.
+- **No echo:** when the app reports a clipboard change whose id is one of the last 8 items the core gave it, the core
+  doesn't send it again.
 - **Not sent:** password-manager items. The apps leave them out before they reach the core.
 
 ## Pairing (`sharedclip/pair/1`)

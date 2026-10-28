@@ -165,8 +165,8 @@ impl Node {
         self.inner.found(&id, &addr)
     }
 
-    /// The local clipboard changed. Sends the item to the paired devices, unless it's the one the core just gave
-    /// the app (`Events::on_clip`). Leave out password-manager items before calling this; the core sends all it gets.
+    /// The local clipboard changed. Sends the item to the paired devices, unless it's one of the last 8 the core gave
+    /// the app (`Events::on_clip`, `fetch`). Leave out password-manager items before calling this; the core sends all it gets.
     pub async fn copy(&self, formats: Vec<Format>, files: Vec<File>) -> Result<(), Error> {
         self.inner.copy(formats, files).await
     }

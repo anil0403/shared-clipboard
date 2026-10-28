@@ -35,6 +35,8 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ADDRS: usize = 8;
 /// How many offers we remember for `fetch`.
 const MAX_OFFERS: usize = 50;
+/// How many items given to the app we remember, so the app reporting them back doesn't send them again.
+const MAX_DELIVERED: usize = 8;
 
 // Why we closed a connection.
 const CLOSE_STOP: u32 = 0;
@@ -69,8 +71,9 @@ pub struct State {
     dialing: HashSet<String>,
     /// Newest first. Only what the list shows; the data is on disk (`store::load_item`).
     pub history: Vec<Meta>,
-    /// The last item given to the app; when the app reports it back, it isn't sent again.
-    last_delivered: Option<String>,
+    /// The last items given to the app, newest first; when the app reports one back, it isn't sent again. More than
+    /// one, because the clipboard watcher may report an item after the next one arrived.
+    delivered: VecDeque<String>,
     /// Offers we got, newest first: (item id, device that has it, size).
     offers: VecDeque<(String, String, u64)>,
     /// `fetch` calls waiting for an item to be in the history.
@@ -467,7 +470,9 @@ impl Inner {
                 }
                 return Ok(());
             }
-            s.last_delivered = Some(meta.id.clone());
+            s.delivered.retain(|d| *d != meta.id);
+            s.delivered.push_front(meta.id.clone());
+            s.delivered.truncate(MAX_DELIVERED);
             let forgotten = s.add_history(meta.clone());
             (waiters, forgotten)
         };
@@ -638,10 +643,9 @@ impl Inner {
         let id = h.finalize().to_hex().to_string();
         {
             let mut s = self.lock();
-            if s.paused || s.last_delivered.as_deref() == Some(id.as_str()) {
+            if s.paused || s.delivered.contains(&id) {
                 return Ok(());
             }
-            s.last_delivered = None;
         }
         let text = formats
             .iter()

@@ -221,6 +221,19 @@ async fn echo_is_not_sent_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn late_echoes_are_not_sent_back() {
+    let (mut a, mut b, _da, _db) = two().await;
+    a.node.copy(text("x"), vec![]).await.unwrap();
+    let x = next(&mut b.clips).await;
+    a.node.copy(text("y"), vec![]).await.unwrap();
+    let y = next(&mut b.clips).await;
+    // B's watcher reports both, after both arrived.
+    b.node.copy(x.formats, x.files).await.unwrap();
+    b.node.copy(y.formats, y.files).await.unwrap();
+    quiet(&mut a.clips).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn big_items_are_offered_then_fetched() {
     let (a, mut b, _da, _db) = two().await;
     let size = SIZE_CAP + 1_000_000;
