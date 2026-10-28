@@ -63,7 +63,7 @@ The only feature so far is `metered`: the device is on mobile data. A device sen
 - **Files:** a receiver saves files under its own folder and makes each name safe for that: `/`, `\` and NUL become
   `_`, and an empty name, `.` or `..` becomes `file`. The item keeps the original `name`, so its id doesn't change.
 - **Limits:** a header is at most 64 KB. A `clip` body bigger than 25 MiB plus 1 MiB is refused, unless it answers a
-  `request` (then the offer's size plus 1 MiB). A pairing message is at most 4 KB.
+  `request` (then the offer's size plus 1 MiB). A pairing message is at most 64 KB.
 - **No echo:** when the app reports a clipboard change whose id is the item the core just gave it, the core doesn't
   send it again.
 - **Not sent:** password-manager items. The apps leave them out before they reach the core.

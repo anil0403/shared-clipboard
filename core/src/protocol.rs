@@ -9,8 +9,8 @@ pub const ALPN: &[u8] = b"sharedclip/1";
 pub const PAIR_ALPN: &[u8] = b"sharedclip/pair/1";
 /// Largest message header we read.
 pub const MAX_HEADER: usize = 64 * 1024;
-/// Largest pairing message we read.
-pub const MAX_PAIR_MSG: usize = 4 * 1024;
+/// Largest pairing message we read. `paired` lists every other device, with up to 8 addresses each.
+pub const MAX_PAIR_MSG: usize = 64 * 1024;
 /// A `clip` body may be this much over `SIZE_CAP` before we refuse it.
 pub const BODY_SLACK: u64 = 1024 * 1024;
 

@@ -353,6 +353,30 @@ async fn wrong_secrets_are_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn joining_a_device_that_has_many_others() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    // A has 10 devices already, each seen at 8 addresses (IPv6 privacy addresses pile up).
+    let addrs: Vec<String> = (0..8)
+        .map(|i| format!("[2001:db8:1234:5678:9abc:def0:1234:{i}]:47820"))
+        .collect();
+    let peers: Vec<_> = (0..10)
+        .map(|i| {
+            serde_json::json!({
+                "id": iroh::SecretKey::generate().public().to_string(),
+                "name": format!("Device {i}"),
+                "platform": "android",
+                "addrs": addrs,
+            })
+        })
+        .collect();
+    std::fs::write(da.path().join("peers.json"), serde_json::to_vec(&peers).unwrap()).unwrap();
+    let a = start(da.path(), "A").await;
+    let b = start(db.path(), "B").await;
+    pair(&a, &b).await;
+    assert_eq!(b.node.devices().len(), 11);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn paused_sends_and_takes_nothing() {
     let (mut a, mut b, _da, _db) = two().await;
     a.node.set_paused(true);
