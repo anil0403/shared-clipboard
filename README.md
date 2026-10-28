@@ -17,12 +17,18 @@ same network (with or without internet). Bluetooth and the internet (with accoun
 
 From [Releases](https://github.com/anil0403/shared-clipboard/releases):
 
-- **Linux:** `sharedclip-<version>-x86_64-linux.tar.gz`. Unpack it, then:
+- **Linux:** one command installs the latest release, checks its signature and starts the service. Run it again to
+  update.
   ```sh
-  install -Dm755 sharedclip ~/.local/bin/sharedclip
-  install -Dm644 sharedclip.service ~/.config/systemd/user/sharedclip.service
-  systemctl --user enable --now sharedclip
+  curl -fsSL https://raw.githubusercontent.com/anil0403/shared-clipboard/main/install.sh | sh
   ```
+  While the repository is private, only the [GitHub CLI](https://cli.github.com) can read it (`gh auth login` once):
+  ```sh
+  gh api -H "Accept: application/vnd.github.raw" repos/anil0403/shared-clipboard/contents/install.sh | sh
+  ```
+  It installs `~/.local/bin/sharedclip` and the systemd user service. To remove it:
+  `systemctl --user disable --now sharedclip && rm ~/.local/bin/sharedclip ~/.config/systemd/user/sharedclip.service`.
+  Or by hand: unpack `sharedclip-<version>-x86_64-linux.tar.gz` and copy those two files to the same places.
 - **Android:** `sharedclip-<version>-android.apk`. Open it on the phone and allow installing from that app when
   asked. A newer APK installs over it and keeps the paired devices.
 
