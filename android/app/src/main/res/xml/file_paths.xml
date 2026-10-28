@@ -1,4 +1,9 @@
-<!-- Received images, shared on the clipboard through FileProvider (Clipboard.kt). -->
+<!-- Items on the clipboard, shared through FileProvider (Clipboard.kt). Never all of filesDir: it holds the device key. -->
 <paths>
+    <!-- Received images -->
     <cache-path name="clips" path="clips/" />
+    <!-- Files the core received (Config.data_dir is filesDir) -->
+    <files-path name="received" path="files/" />
+    <!-- Files sent from this device -->
+    <files-path name="sent" path="send/" />
 </paths>

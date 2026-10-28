@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -25,10 +24,10 @@ import android.util.Log
 import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Config
@@ -37,11 +36,13 @@ import com.noobsbot.sharedclip.core.Events
 import com.noobsbot.sharedclip.core.Node
 import com.noobsbot.sharedclip.core.Offer
 import com.noobsbot.sharedclip.core.Platform
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.Inet6Address
 import java.net.InetAddress
 
@@ -57,22 +58,39 @@ object Shared {
     var paused by mutableStateOf(false)
     /** Goes up when the history changes. */
     var historyVersion by mutableIntStateOf(0)
-    /** When the last item we sent was copied, so the same copy isn't sent twice. */
-    var lastSent = 0L
+    /** Items too big to send right away (Events.onOffer), newest first, until downloaded. */
+    val offers = mutableStateListOf<Offer>()
 }
 
 data class Nearby(val id: String, val name: String)
+
+/** "photo.jpg from Laptop" */
+fun Offer.title(): String {
+    val from = Shared.devices.find { it.id == this.from }?.name ?: "another device"
+    return "${fileNames.joinToString().ifEmpty { mimes.firstOrNull() ?: "An item" }} from $from"
+}
 
 /** Starts the service, or hands it an action. */
 fun Context.service(action: String? = null, id: String? = null) {
     startForegroundService(Intent(this, ClipService::class.java).setAction(action).putExtra("id", id))
 }
 
-/** Runs a core call, showing what went wrong as a toast. */
+/** Closes the pairing code dialog and its notification. */
+fun Context.endPairing() {
+    Shared.pairing = null
+    getSystemService(NotificationManager::class.java).cancel(ClipService.PAIRING)
+}
+
+/** Runs a core call, showing what went wrong as a toast. Starts the core first if it isn't running. */
 fun Context.call(block: suspend (Node) -> Unit) {
-    val node = Shared.node ?: return toast("Shared Clipboard is still starting").also { service() }
+    if (Shared.node == null) service()
     Shared.scope.launch {
         try {
+            // ponytail: polls, because snapshotFlow only hears of changes once a Compose screen has been shown.
+            val node = withTimeoutOrNull(30_000) {
+                while (Shared.node == null) delay(100)
+                Shared.node
+            } ?: return@launch toast(Shared.error?.let { "Couldn't start: $it" } ?: "Shared Clipboard didn't start")
             block(node)
         } catch (e: Exception) {
             toast(e.message ?: e.toString())
@@ -122,6 +140,8 @@ class ClipService : Service() {
                 advertise(node)
                 Shared.node = node
                 Shared.error = null
+                val sent = node.history().flatMap { it.files }.map { it.path }
+                launch(Dispatchers.IO) { deleteUnsent(sent) }
             } catch (e: Exception) {
                 Log.e(TAG, "The core didn't start", e)
                 Shared.error = e.message ?: e.toString()
@@ -129,10 +149,6 @@ class ClipService : Service() {
                 return@launch
             }
             cm.registerNetworkCallback(wifiRequest, wifiCallback, Handler(mainLooper))
-            ContextCompat.registerReceiver(
-                this@ClipService, dataSaver, IntentFilter(ConnectivityManager.ACTION_RESTRICT_BACKGROUND_CHANGED),
-                ContextCompat.RECEIVER_NOT_EXPORTED,
-            )
             updateMetered()
             update()
         }
@@ -147,6 +163,7 @@ class ClipService : Service() {
                 nm.cancel(id.hashCode())
                 call {
                     writeClip(it.fetch(id))
+                    Shared.offers.removeAll { offer -> offer.id == id }
                     Shared.historyVersion++
                 }
             }
@@ -159,7 +176,6 @@ class ClipService : Service() {
         Shared.node?.let { node ->
             Shared.node = null
             cm.unregisterNetworkCallback(wifiCallback)
-            unregisterReceiver(dataSaver)
             nsd.unregisterService(registration)
             stopDiscovery()
             cm.bindProcessToNetwork(null)
@@ -181,7 +197,11 @@ class ClipService : Service() {
         }
 
         override fun onOffer(offer: Offer) {
-            Shared.scope.launch { notifyOffer(offer) }
+            Shared.scope.launch {
+                Shared.offers.removeAll { it.id == offer.id }
+                Shared.offers.add(0, offer)
+                notifyOffer(offer)
+            }
         }
 
         override fun onDevices(devices: List<Device>) {
@@ -193,17 +213,25 @@ class ClipService : Service() {
 
         override fun onPairingCode(device: Device, code: String) {
             Shared.scope.launch {
-                Shared.pairing = device to code
+                val pairing = device to code
+                Shared.pairing = pairing
                 nm.notify(
                     PAIRING,
                     Notification.Builder(this@ClipService, ALERTS)
                         .setSmallIcon(R.drawable.ic_clip)
                         .setContentTitle("Pair with ${device.name}?")
                         .setContentText("Code $code. Tap to answer.")
-                        .setContentIntent(activity(MainActivity::class.java))
+                        .setContentIntent(activity(Intent(this@ClipService, MainActivity::class.java)))
                         .setAutoCancel(true)
                         .build(),
                 )
+                // The core gives up after 2 minutes (CONFIRM_TIMEOUT), or sooner if the other device says no,
+                // without telling us. So close the dialog then.
+                delay(120_000)
+                if (Shared.pairing == pairing) {
+                    endPairing()
+                    toast("Pairing with ${device.name} didn't go through")
+                }
             }
         }
     }
@@ -232,28 +260,27 @@ class ClipService : Service() {
             .setSmallIcon(R.drawable.ic_clip)
             .setContentTitle(title)
             .setOngoing(true)
-            .setContentIntent(activity(MainActivity::class.java))
-            .addAction(action("Send clipboard", activity(SendActivity::class.java)))
+            .setContentIntent(activity(Intent(this, MainActivity::class.java)))
+            .addAction(action("Send clipboard", activity(sendClipboardIntent())))
             .addAction(action(if (Shared.paused) "Resume" else "Pause", serviceIntent(PAUSE, null)))
             .build()
     }
 
+    // The home screen lists offers too, in case notifications are off.
     private fun notifyOffer(offer: Offer) {
-        val from = Shared.devices.find { it.id == offer.from }?.name ?: "another device"
-        val what = offer.fileNames.joinToString().ifEmpty { offer.mimes.firstOrNull() ?: "An item" }
         nm.notify(
             offer.id.hashCode(),
             Notification.Builder(this, ALERTS)
                 .setSmallIcon(R.drawable.ic_clip)
-                .setContentTitle("$what from $from")
+                .setContentTitle(offer.title())
                 .setContentText(Formatter.formatShortFileSize(this, offer.size.toLong()))
                 .addAction(action("Download", serviceIntent(FETCH, offer.id)))
                 .build(),
         )
     }
 
-    private fun activity(c: Class<*>) =
-        PendingIntent.getActivity(this, 0, Intent(this, c).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
+    private fun activity(intent: Intent) =
+        PendingIntent.getActivity(this, 0, intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
 
     private fun serviceIntent(action: String, id: String?) = PendingIntent.getForegroundService(
         this, id.hashCode(), Intent(this, ClipService::class.java).setAction(action).putExtra("id", id),
@@ -388,16 +415,11 @@ class ClipService : Service() {
         }
     }
 
-    private val dataSaver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) = updateMetered()
-    }
-
-    /** Metered Wi-Fi, mobile data and Data Saver all count as metered. */
+    /** Metered Wi-Fi and mobile data count as metered. Data Saver doesn't: it limits other apps' background use. */
     private fun updateMetered() {
-        val dataSaver = cm.restrictBackgroundStatus == ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED
         val metered = wifiCaps?.let { !it.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) }
             ?: cm.isActiveNetworkMetered
-        Shared.node?.setMetered(metered || dataSaver)
+        Shared.node?.setMetered(metered)
     }
 
     companion object {

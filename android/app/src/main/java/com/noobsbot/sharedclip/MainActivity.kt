@@ -1,13 +1,13 @@
 package com.noobsbot.sharedclip
 
 import android.Manifest
-import android.app.NotificationManager
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.text.format.Formatter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -56,13 +56,13 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
-import androidx.lifecycle.lifecycleScope
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Device
+import com.noobsbot.sharedclip.core.Offer
 import com.noobsbot.sharedclip.core.Platform
 import kotlinx.coroutines.launch
 
@@ -102,9 +102,7 @@ class MainActivity : ComponentActivity() {
         if (hasFocus) autoSend()
     }
 
-    private fun autoSend() {
-        lifecycleScope.launch { sendClipboard(auto = true) }
-    }
+    private fun autoSend() = sendClipboard(auto = true)
 }
 
 @Composable
@@ -148,6 +146,8 @@ private fun HomeScreen(onPair: () -> Unit) {
         item { Header("Devices") { TextButton(onPair) { Text("Pair a device") } } }
         if (Shared.devices.isEmpty()) item { Text("No paired devices yet.") }
         items(Shared.devices, key = { it.id }) { DeviceRow(it) }
+        if (Shared.offers.isNotEmpty()) item { Header("Ready to download") }
+        items(Shared.offers, key = { it.id }) { OfferRow(it) }
         item { Header("History") }
         if (history.isEmpty()) item { Text("Nothing copied yet.") }
         items(history) { HistoryRow(it) }
@@ -211,12 +211,25 @@ private fun DeviceRow(device: Device) {
 }
 
 @Composable
+private fun OfferRow(offer: Offer) {
+    val context = LocalContext.current
+    ListItem(
+        headlineContent = { Text(offer.title(), maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(Formatter.formatShortFileSize(context, offer.size.toLong())) },
+        trailingContent = { TextButton({ context.service(ClipService.FETCH, offer.id) }) { Text("Download") } },
+    )
+}
+
+@Composable
 private fun HistoryRow(clip: Clip) {
     val context = LocalContext.current
     val from = if (clip.from == Shared.node?.id()) "This device" else Shared.devices.find { it.id == clip.from }?.name
     ListItem(
         headlineContent = { Text(clip.preview(), maxLines = 2, overflow = TextOverflow.Ellipsis) },
         supportingContent = { Text(from ?: "Another device") },
+        trailingContent = if (clip.files.isEmpty()) null else {
+            { TextButton({ Shared.scope.launch { context.saveDownloads(clip.files) } }) { Text("Save") } }
+        },
         modifier = Modifier.clickable(onClickLabel = "Copy") {
             Shared.scope.launch { runCatching { context.writeClip(clip) }.onFailure { context.toast("Couldn't copy it") } }
         },
@@ -264,8 +277,13 @@ private fun PairScreen(onDone: () -> Unit) {
                 supportingContent = { Text("Tap to pair by comparing a code") },
                 modifier = Modifier.clickable {
                     context.call {
-                        context.toast("Paired with ${it.pairDevice(device.id).name}")
-                        onDone()
+                        try {
+                            context.toast("Paired with ${it.pairDevice(device.id).name}")
+                            onDone()
+                        } finally {
+                            // Rejected or timed out: the code dialog would stay open.
+                            if (Shared.pairing?.first?.id == device.id) context.endPairing()
+                        }
                     }
                 },
             )
@@ -279,8 +297,7 @@ private fun CodeDialog() {
     val (device, code) = Shared.pairing ?: return
     val context = LocalContext.current
     fun answer(accept: Boolean) {
-        Shared.pairing = null
-        context.getSystemService(NotificationManager::class.java).cancel(ClipService.PAIRING)
+        context.endPairing()
         runCatching { Shared.node?.confirmPairing(device.id, accept) }
     }
     AlertDialog(
