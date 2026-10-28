@@ -397,6 +397,7 @@ class ClipService : Service() {
         override fun onAvailable(network: Network) {
             wifi = network
             cm.bindProcessToNetwork(network)
+            networkChange()
             discover()
         }
 
@@ -411,8 +412,14 @@ class ClipService : Service() {
             wifi = null
             wifiCaps = null
             cm.bindProcessToNetwork(null)
+            networkChange()
             updateMetered()
         }
+    }
+
+    /** Tells the core, so it checks its connections and dials the offline devices now. */
+    private fun networkChange() {
+        Shared.node?.let { scope.launch { it.networkChange() } }
     }
 
     /** Metered Wi-Fi and mobile data count as metered. Data Saver doesn't: it limits other apps' background use. */
