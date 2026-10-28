@@ -191,10 +191,10 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
 
     // Local copies go to the node in order, from the watcher's thread.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (failed, mut watch_failed) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let err = clip::watch(watcher, |formats, files| drop(tx.send((formats, files))));
-        eprintln!("sharedclip: clipboard: {err}");
-        std::process::exit(1);
+        let _ = failed.send(err.to_string());
     });
     let n = node.clone();
     tokio::spawn(async move {
@@ -220,14 +220,19 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
     });
 
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = tokio::signal::ctrl_c() => {}
-    }
-    let _ = mdns.shutdown();
+    let result = tokio::select! {
+        _ = term.recv() => Ok(()),
+        _ = tokio::signal::ctrl_c() => Ok(()),
+        Ok(err) = &mut watch_failed => Err(format!("clipboard: {err}")),
+    };
+    // Say goodbye on mDNS, so other devices drop this one now.
+    let goodbye = mdns.shutdown();
     node.stop().await;
     let _ = std::fs::remove_file(&sock);
-    Ok(())
+    if let Ok(goodbye) = goodbye {
+        let _ = goodbye.recv_timeout(Duration::from_secs(1));
+    }
+    result
 }
 
 /// `$XDG_DATA_HOME/sharedclip`, by default `~/.local/share/sharedclip`.
