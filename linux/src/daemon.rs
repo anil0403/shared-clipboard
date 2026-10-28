@@ -363,7 +363,11 @@ async fn handle(app: &App, stream: UnixStream) -> std::io::Result<()> {
         },
         "devices" => {
             let rows = node.devices().into_iter().map(|d| {
-                let state = if d.online { "online" } else { "offline" };
+                let state = match (d.online, d.bluetooth) {
+                    (_, true) => "online over Bluetooth",
+                    (true, _) => "online",
+                    _ => "offline",
+                };
                 format!("{}  ({:?}, {state})  {}", clean(&d.name), d.platform, clean(&d.id))
             });
             let rows = rows.collect::<Vec<_>>().join("\n");
