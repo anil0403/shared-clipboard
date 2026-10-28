@@ -89,7 +89,8 @@ impl Events for Hooks {
 
     fn on_offer(&self, offer: Offer) {
         let what = [offer.mimes.join(", "), offer.file_names.join(", ")].join(" ");
-        eprintln!("offer {}: {} bytes from {}: {what}", offer.id, offer.size, offer.from);
+        let (from, what) = (clean(&offer.from), clean(&what));
+        eprintln!("offer {}: {} bytes from {from}: {what}", offer.id, offer.size);
         let Some(node) = self.0.node.get().cloned().filter(|_| offer.size <= FETCH_LIMIT) else {
             return;
         };
@@ -109,7 +110,7 @@ impl Events for Hooks {
     fn on_pairing_code(&self, device: Device, code: String) {
         eprintln!(
             "pairing with {}: code {code}; confirm it in `sharedclip pair`",
-            device.name
+            clean(&device.name)
         );
         *self.0.pending.lock().unwrap() = Some((device.clone(), code.clone()));
         let _ = self.0.events.send(Ev::Code(device.clone(), code.clone()));
@@ -330,7 +331,7 @@ async fn handle(app: &App, stream: UnixStream) -> std::io::Result<()> {
             let rows = list
                 .iter()
                 .enumerate()
-                .map(|(i, (_, name, platform))| format!("{}. {name} ({platform})", i + 1));
+                .map(|(i, (_, name, platform))| format!("{}. {} ({})", i + 1, clean(name), clean(platform)));
             let rows = rows.collect::<Vec<_>>().join("\n");
             if rows.is_empty() {
                 "No devices found nearby.".into()
@@ -348,13 +349,13 @@ async fn handle(app: &App, stream: UnixStream) -> std::io::Result<()> {
             return session(app, lines, out, async move { node.pair_device(id).await }).await;
         }
         "pair" => match node.pair_link(arg.into()).await {
-            Ok(device) => format!("Paired with {}", device.name),
+            Ok(device) => format!("Paired with {}", clean(&device.name)),
             Err(err) => format!("error: {err}"),
         },
         "devices" => {
             let rows = node.devices().into_iter().map(|d| {
                 let state = if d.online { "online" } else { "offline" };
-                format!("{}  ({:?}, {state})  {}", d.name, d.platform, d.id)
+                format!("{}  ({:?}, {state})  {}", clean(&d.name), d.platform, clean(&d.id))
             });
             let rows = rows.collect::<Vec<_>>().join("\n");
             if rows.is_empty() {
@@ -371,7 +372,7 @@ async fn handle(app: &App, stream: UnixStream) -> std::io::Result<()> {
                 .collect();
             match &found[..] {
                 [device] => match node.unpair(device.id.clone()).await {
-                    Ok(()) => format!("Unpaired {}", device.name),
+                    Ok(()) => format!("Unpaired {}", clean(&device.name)),
                     Err(err) => format!("error: {err}"),
                 },
                 [] => format!("error: no paired device {arg:?}; see sharedclip devices"),
@@ -413,7 +414,8 @@ async fn session(
     let confirm = |d: &Device, code: &str| {
         format!(
             "confirm {} Pairing code with {}: {code}. Accept? [y/N] \n",
-            d.id, d.name
+            clean(&d.id),
+            clean(&d.name)
         )
     };
     let pending = app.pending.lock().unwrap().clone();
@@ -425,7 +427,7 @@ async fn session(
         tokio::select! {
             result = &mut done => {
                 let text = match result {
-                    Ok(d) if known.insert(d.id.clone()) => format!("Paired with {}\n", d.name),
+                    Ok(d) if known.insert(d.id.clone()) => format!("Paired with {}\n", clean(&d.name)),
                     Ok(_) => String::new(),
                     Err(err) => format!("error: {err}\n"),
                 };
@@ -434,7 +436,7 @@ async fn session(
             event = events.recv() => match event {
                 Ok(Ev::Code(device, code)) => out.write_all(confirm(&device, &code).as_bytes()).await?,
                 Ok(Ev::Devices(devices)) => {
-                    let new: Vec<String> = devices.into_iter().filter(|d| known.insert(d.id.clone())).map(|d| d.name).collect();
+                    let new: Vec<String> = devices.into_iter().filter(|d| known.insert(d.id.clone())).map(|d| clean(&d.name)).collect();
                     if !new.is_empty() {
                         return out.write_all(format!("Paired with {}\n", new.join(", ")).as_bytes()).await;
                     }
@@ -483,5 +485,25 @@ fn summary(clip: &Clip, from: &str) -> String {
             .collect::<Vec<_>>()
             .join(", "),
     };
-    format!("{age:>4}  {from:<20}  {what}")
+    format!("{age:>4}  {:<20}  {}", clean(from), clean(&what))
+}
+
+/// `s` with control characters (newlines, terminal escapes) replaced: names and text from other devices go to the
+/// terminal and the control socket's lines.
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { char::REPLACEMENT_CHARACTER } else { c })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn clean_strips_control_characters() {
+        assert_eq!(
+            super::clean("a\nconfirm x\x1b[2Jb\u{9b}"),
+            "a\u{fffd}confirm x\u{fffd}[2Jb\u{fffd}"
+        );
+        assert_eq!(super::clean("Anil's phone é"), "Anil's phone é");
+    }
 }
