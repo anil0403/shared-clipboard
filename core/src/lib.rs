@@ -140,7 +140,8 @@ pub struct Node {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Node {
-    /// Loads or creates this device's key, starts listening and connects to paired devices it can reach.
+    /// Loads or creates this device's key, starts listening and connects to paired devices it can reach. Devices
+    /// that are offline are dialed again now and then (5 s, doubling up to 5 minutes apart).
     /// Must be called on a tokio runtime (UniFFI provides one); the node keeps running on it.
     #[uniffi::constructor]
     pub async fn start(config: Config, events: Arc<dyn Events>) -> Result<Arc<Self>, Error> {
@@ -221,6 +222,12 @@ impl Node {
     /// Forgets device `id`, and tells the other paired devices to forget it too.
     pub async fn unpair(&self, id: String) -> Result<(), Error> {
         self.inner.unpair(&id).await
+    }
+
+    /// The device's network changed (e.g. it joined another Wi-Fi): checks the connections, and dials the paired
+    /// devices that are offline now instead of at their next try.
+    pub async fn network_change(&self) {
+        self.inner.network_change().await
     }
 
     /// On mobile data or a limited network: text still goes right away, everything else becomes an offer.

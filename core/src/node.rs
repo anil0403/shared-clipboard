@@ -11,13 +11,13 @@ use std::{
 use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, TransportAddr,
     endpoint::{
-        BindOpts, Connection, ConnectionError, IdleTimeout, IncomingAddr, QuicTransportConfig, RecvStream, Side,
-        VarInt, presets,
+        BindOpts, Connection, IdleTimeout, IncomingAddr, QuicTransportConfig, RecvStream, Side, VarInt, presets,
     },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::oneshot,
+    time::Instant,
 };
 
 use crate::{
@@ -31,6 +31,9 @@ use crate::{
 };
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Waits between dials to an offline device: the first, doubling up to the last.
+const REDIAL_FIRST: Duration = Duration::from_secs(5);
+const REDIAL_MAX: Duration = Duration::from_secs(5 * 60);
 /// How many addresses we keep for each device, newest first.
 const MAX_ADDRS: usize = 8;
 /// How many offers we remember for `fetch`.
@@ -56,6 +59,8 @@ pub struct Inner {
     /// The runtime `start` ran on; sync methods spawn their work here.
     rt: tokio::runtime::Handle,
     state: Mutex<State>,
+    /// Wakes `redial_loop`: a device went offline, the network changed, or the node stopped.
+    wake: tokio::sync::Notify,
     /// Held while `copy` adds an item to the history, so items go in the order the calls start.
     copying: tokio::sync::Mutex<()>,
     /// Held while writing the state's files, so the last write has the newest state.
@@ -88,6 +93,8 @@ pub struct State {
     /// The user's answer to a pairing code, by device id.
     pub confirms: HashMap<String, oneshot::Sender<bool>>,
     stopped: bool,
+    /// When to dial each offline device next, and the wait after that.
+    redial: HashMap<String, (Instant, Duration)>,
     /// Devices the user unpaired: another device listing them (`peers`, `paired`) doesn't bring them back.
     removed: HashSet<String>,
 }
@@ -155,14 +162,12 @@ impl Inner {
             dir,
             rt,
             state: Mutex::new(state),
+            wake: tokio::sync::Notify::new(),
             copying: tokio::sync::Mutex::new(()),
             saving: Mutex::new(()),
         });
         inner.spawn(inner.clone().accept_loop());
-        let ids: Vec<String> = inner.lock().peers.keys().cloned().collect();
-        for id in ids {
-            inner.connect(&id);
-        }
+        inner.spawn(inner.clone().redial_loop());
         Ok(inner)
     }
 
@@ -276,6 +281,7 @@ impl Inner {
                         metered: None,
                     };
                     s.conns.insert(id.clone(), c);
+                    s.redial.remove(&id);
                     (Some(old.is_none()), moved)
                 }
             }
@@ -311,22 +317,56 @@ impl Inner {
                 let _ = this.handle(&id, cid, recv).await;
             });
         }
-        let retry = {
+        {
             let mut s = self.lock();
             if s.conns.get(&id).is_none_or(|c| c.conn.stable_id() != conn.stable_id()) {
                 return;
             }
             s.conns.remove(&id);
-            matches!(conn.close_reason(), Some(ConnectionError::TimedOut))
-        };
+        }
         self.emit_devices();
-        // The network dropped: try once more; after that, discovery (`found`) brings it back.
-        if retry {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if !self.lock().conns.contains_key(&id) {
+        self.wake.notify_one();
+    }
+
+    /// Dials paired devices that are offline: at once, then after 5 s, 10 s, 20 s... up to 5 minutes apart. A
+    /// connection starts the waits over, and `network_change` dials them all now.
+    async fn redial_loop(self: Arc<Self>) {
+        loop {
+            let (due, next) = {
+                let mut s = self.lock();
+                if s.stopped {
+                    return;
+                }
+                let s = &mut *s;
+                let now = Instant::now();
+                s.redial
+                    .retain(|id, _| s.peers.contains_key(id) && !s.conns.contains_key(id));
+                let mut due = Vec::new();
+                for id in s.peers.keys().filter(|id| !s.conns.contains_key(*id)) {
+                    let (at, wait) = s.redial.entry(id.clone()).or_insert((now, REDIAL_FIRST));
+                    if *at <= now {
+                        *at = now + *wait;
+                        *wait = (*wait * 2).min(REDIAL_MAX);
+                        due.push(id.clone());
+                    }
+                }
+                (due, s.redial.values().map(|r| r.0).min())
+            };
+            for id in due {
                 self.connect(&id);
             }
+            match next {
+                Some(at) => _ = tokio::time::timeout_at(at, self.wake.notified()).await,
+                None => self.wake.notified().await,
+            }
         }
+    }
+
+    /// The network changed: let iroh check its paths, and dial every offline device now.
+    pub async fn network_change(&self) {
+        self.ep.network_change().await;
+        self.lock().redial.clear();
+        self.wake.notify_one();
     }
 
     /// One incoming message. `cid` is the connection it came on.
@@ -842,6 +882,7 @@ impl Inner {
             s.stopped = true;
             s.conns.drain().map(|(_, c)| c).collect()
         };
+        self.wake.notify_one();
         for c in conns {
             c.conn.close(VarInt::from_u32(CLOSE_STOP), b"stop");
         }

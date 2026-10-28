@@ -454,6 +454,22 @@ async fn catch_up_on_reconnect() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_went_away_is_dialed_again() {
+    let (a, b, _da, db) = two().await;
+    let (b_id, port) = (b.id.clone(), b.node.port());
+    b.node.stop().await;
+    drop(b);
+    wait_until(|| !online(&a, &b_id)).await;
+    // B comes back on the same port, but without A's addresses, so only A can dial.
+    let peers = db.path().join("peers.json");
+    let mut list: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(&peers).unwrap()).unwrap();
+    list.iter_mut().for_each(|p| p["addrs"] = serde_json::json!([]));
+    std::fs::write(&peers, serde_json::to_vec(&list).unwrap()).unwrap();
+    let _b = start_on(db.path(), "B", port).await;
+    wait_until(|| online(&a, &b_id)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wrong_secrets_are_rejected() {
     let dirs = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
     let a = start(dirs[0].path(), "A").await;
