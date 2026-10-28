@@ -21,8 +21,8 @@ use crate::{
     Clip, Config, DEFAULT_PORT, Device, Error, Events, File, Format, Offer, PROTOCOL_VERSION, Platform, SIZE_CAP,
     pairing::{self, Link},
     protocol::{
-        ALPN, BODY_SLACK, ClipMsg, FilePart, FormatPart, MAX_HEADER, Msg, OfferMsg, PAIR_ALPN, PeerInfo, hash_part,
-        is_text, net, read_frame, send_msg, size, valid_id, write_frame,
+        ALPN, BODY_SLACK, ClipMsg, FilePart, FormatPart, MAX_FILE_NAME, MAX_HEADER, MAX_NAME, Msg, OfferMsg, PAIR_ALPN,
+        PeerInfo, clean, hash_part, is_text, net, read_frame, send_msg, size, valid_id, write_frame,
     },
     store::{self, HISTORY_LEN, io},
 };
@@ -301,7 +301,13 @@ impl Inner {
                 platform,
                 features,
                 ..
-            } => self.on_hello(from, cid, name, platform, features.iter().any(|f| f == "metered")),
+            } => self.on_hello(
+                from,
+                cid,
+                clean(&name, MAX_NAME),
+                platform,
+                features.iter().any(|f| f == "metered"),
+            ),
             Msg::Clip(m) => self.on_clip(from, recv, m).await?,
             Msg::Offer(m) => self.on_offer(from, m),
             Msg::Request { id } => self.on_request(from, &id),
@@ -454,7 +460,7 @@ impl Inner {
             time_ms: m.time_ms,
             size: m.size,
             mimes: m.mimes,
-            file_names: m.file_names,
+            file_names: m.file_names.iter().map(|n| clean(n, MAX_FILE_NAME)).collect(),
         };
         self.events.on_offer(offer);
     }
@@ -493,6 +499,7 @@ impl Inner {
             if d.id == self.id {
                 continue;
             }
+            d.name = clean(&d.name, MAX_NAME);
             let addrs = parse_addrs(&d.addrs);
             match s.peers.get_mut(&d.id) {
                 Some(p) => addrs.into_iter().rev().for_each(|a| _ = remember(&mut p.addrs, a)),

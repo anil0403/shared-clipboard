@@ -169,6 +169,18 @@ pub fn hash_part(h: &mut blake3::Hasher, name: &str, len: u64) {
     h.update(&len.to_le_bytes());
 }
 
+/// Longest device name we keep, in characters.
+pub const MAX_NAME: usize = 64;
+/// Longest file name we hand to the app, in characters.
+pub const MAX_FILE_NAME: usize = 200;
+
+/// A name another device sent, without control characters (they could drive a terminal) or text-direction
+/// overrides, and at most `max` characters.
+pub fn clean(name: &str, max: usize) -> String {
+    let bad = |c: char| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    name.chars().filter(|&c| !bad(c)).take(max).collect()
+}
+
 /// An item id is 64 lowercase hex characters; we check it before using it in a path.
 pub fn valid_id(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -194,6 +206,13 @@ mod tests {
         assert!(matches!(msg, Msg::Unknown));
         let msg: Msg = serde_json::from_str(r#"{"type":"request","id":"ab","extra":[1,2]}"#).unwrap();
         assert!(matches!(msg, Msg::Request { id } if id == "ab"));
+    }
+
+    #[test]
+    fn names_are_cleaned() {
+        assert_eq!(clean("Anil's\x1b[31m Mac\n", MAX_NAME), "Anil's[31m Mac");
+        assert_eq!(clean("a\u{202e}b", MAX_NAME), "ab");
+        assert_eq!(clean(&"x".repeat(100), MAX_NAME).len(), 64);
     }
 
     #[test]

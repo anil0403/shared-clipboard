@@ -16,7 +16,7 @@ use tokio::{sync::oneshot, time::timeout};
 use crate::{
     Device, Error,
     node::{Inner, parse_addrs},
-    protocol::{MAX_PAIR_MSG, PAIR_ALPN, PairMsg, PeerInfo, net, read_frame, write_frame},
+    protocol::{MAX_NAME, MAX_PAIR_MSG, PAIR_ALPN, PairMsg, PeerInfo, clean, net, read_frame, write_frame},
 };
 
 const LINK_TTL: Duration = Duration::from_secs(10 * 60);
@@ -127,6 +127,7 @@ pub async fn pair_device(inner: &Arc<Inner>, id: &str) -> Result<Device, Error> 
         return Err(Error::PairingRejected);
     };
     let nonce_a = decode_nonce(&nonce)?;
+    let name = clean(&name, MAX_NAME);
     write_frame(
         &mut send,
         &PairMsg::Reveal {
@@ -165,6 +166,7 @@ fn joined(inner: &Arc<Inner>, id: PublicKey, addrs: &[SocketAddr], reply: PairMs
     else {
         return Err(Error::PairingRejected);
     };
+    let name = clean(&name, MAX_NAME);
     let addrs = addrs.iter().map(|a| a.to_string()).collect();
     let peer = PeerInfo {
         id: id.to_string(),
@@ -233,9 +235,9 @@ async fn check(
     recv: &mut RecvStream,
 ) -> Result<Option<PeerInfo>, Error> {
     let id = conn.remote_id();
-    let peer = |name, platform| PeerInfo {
+    let peer = |name: String, platform| PeerInfo {
         id: id.to_string(),
-        name,
+        name: clean(&name, MAX_NAME),
         platform,
         addrs: addr.iter().map(|a| a.to_string()).collect(),
     };
@@ -263,7 +265,7 @@ async fn check(
             let code = code(&inner.ep.id(), &id, &nonce_a, &nonce_b);
             let device = Device {
                 id: id.to_string(),
-                name: name.clone(),
+                name: clean(&name, MAX_NAME),
                 platform,
                 online: true,
             };

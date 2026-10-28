@@ -155,10 +155,20 @@ pub fn forget(dir: &Path, id: &str) {
 
 /// A received file name that is safe to use as one path component.
 pub fn safe_name(name: &str) -> String {
-    let name: String = name
+    let mut name: String = name
         .chars()
-        .map(|c| if matches!(c, '/' | '\\' | '\0') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
+    // File systems take 255 bytes; leave room for the prefix that tells clashing names apart.
+    while name.len() > 200 {
+        name.pop();
+    }
     if name.is_empty() || name == "." || name == ".." {
         "file".into()
     } else {
@@ -195,5 +205,7 @@ mod tests {
         assert_eq!(safe_name(".."), "file");
         assert_eq!(safe_name(""), "file");
         assert_eq!(safe_name("a\\b"), "a_b");
+        assert_eq!(safe_name("a\x1b[0m\n"), "a_[0m_");
+        assert_eq!(safe_name(&"é".repeat(200)).len(), 200);
     }
 }
