@@ -10,9 +10,7 @@ use std::{
 
 use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, TransportAddr,
-    endpoint::{
-        BindOpts, Connection, IdleTimeout, IncomingAddr, QuicTransportConfig, RecvStream, Side, VarInt, presets,
-    },
+    endpoint::{BindOpts, Connection, IdleTimeout, IncomingAddr, QuicTransportConfig, Side, VarInt, presets},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -22,6 +20,7 @@ use tokio::{
 
 use crate::{
     Clip, Config, DEFAULT_PORT, Device, Error, Events, File, Format, Offer, PROTOCOL_VERSION, Platform, SIZE_CAP,
+    bluetooth::{self, BLE_CAP, Ble, BleConn, ble_limit},
     pairing::{self, Link},
     protocol::{
         ALPN, BODY_SLACK, ClipMsg, FilePart, FormatPart, MAX_FILE_NAME, MAX_HEADER, MAX_NAME, Msg, OfferMsg, PAIR_ALPN,
@@ -75,6 +74,10 @@ pub struct State {
     pub peers: BTreeMap<String, PeerInfo>,
     /// The connection to each paired device that's online.
     conns: HashMap<String, Conn>,
+    /// The Bluetooth link to each paired device that has one. Used only while there's no connection in `conns`.
+    pub(crate) ble: HashMap<String, BleConn>,
+    /// How long a Bluetooth link may receive nothing before it's closed.
+    pub(crate) ble_idle: Duration,
     /// Addresses of unpaired devices that discovery found, for `pair_device`.
     pub found: HashMap<String, Vec<String>>,
     dialing: HashSet<String>,
@@ -94,7 +97,7 @@ pub struct State {
     pub pairing: bool,
     /// The user's answer to a pairing code, by device id.
     pub confirms: HashMap<String, oneshot::Sender<bool>>,
-    stopped: bool,
+    pub(crate) stopped: bool,
     /// When to dial each offline device next, and the wait after that.
     redial: HashMap<String, (Instant, Duration)>,
     /// Devices the user unpaired: another device listing them (`peers`, `paired`) doesn't bring them back.
@@ -111,13 +114,33 @@ struct Conn {
 
 impl State {
     pub fn devices(&self) -> Vec<Device> {
-        let device = |p: &PeerInfo| Device {
-            id: p.id.clone(),
-            name: p.name.clone(),
-            platform: p.platform,
-            online: self.conns.contains_key(&p.id),
+        let device = |p: &PeerInfo| {
+            let (net, ble) = (self.conns.contains_key(&p.id), self.ble.contains_key(&p.id));
+            Device {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                platform: p.platform,
+                online: net || ble,
+                bluetooth: ble && !net,
+            }
         };
         self.peers.values().map(device).collect()
+    }
+
+    /// Some paired device isn't connected over the network.
+    pub fn bluetooth_wanted(&self) -> bool {
+        self.peers.keys().any(|id| !self.conns.contains_key(id))
+    }
+
+    /// The link to each device that's online: the network if it's up, else Bluetooth. With what its `hello` said
+    /// about a metered network, `None` until it arrives.
+    fn links(&self) -> impl Iterator<Item = (&String, Via, Option<bool>)> {
+        let net = self
+            .conns
+            .iter()
+            .map(|(id, c)| (id, Via::Net(c.conn.clone()), c.metered));
+        let ble = self.ble.iter().filter(|(id, _)| !self.conns.contains_key(*id));
+        net.chain(ble.map(|(id, b)| (id, Via::Ble(b.ble.clone()), b.metered)))
     }
 
     /// Puts an item first in the history. Its data must already be saved. Returns the ids that dropped out, for
@@ -154,6 +177,7 @@ impl Inner {
             peers: store::load_peers(&dir).into_iter().map(|p| (p.id.clone(), p)).collect(),
             removed: store::load_removed(&dir),
             history: store::load_history(&dir),
+            ble_idle: bluetooth::IDLE,
             ..Default::default()
         };
         let inner = Arc::new(Inner {
@@ -305,7 +329,7 @@ impl Inner {
         });
     }
 
-    fn hello(&self) -> Msg {
+    pub fn hello(&self) -> Msg {
         let metered = self.lock().metered;
         Msg::Hello {
             name: self.name.clone(),
@@ -316,10 +340,12 @@ impl Inner {
     }
 
     async fn read_loop(self: Arc<Self>, id: String, conn: Connection) {
-        while let Ok(recv) = conn.accept_uni().await {
-            let (this, id, cid) = (self.clone(), id.clone(), conn.stable_id());
+        while let Ok(mut recv) = conn.accept_uni().await {
+            let (this, id, via) = (self.clone(), id.clone(), Via::Net(conn.clone()));
             self.spawn(async move {
-                let _ = this.handle(&id, cid, recv).await;
+                if let Ok(msg) = read_frame(&mut recv, MAX_HEADER).await {
+                    let _ = this.handle(&id, &via, msg, recv).await;
+                }
             });
         }
         {
@@ -374,9 +400,15 @@ impl Inner {
         self.wake.notify_one();
     }
 
-    /// One incoming message. `cid` is the connection it came on.
-    async fn handle(self: &Arc<Self>, from: &str, cid: usize, mut recv: RecvStream) -> Result<(), Error> {
-        match read_frame(&mut recv, MAX_HEADER).await? {
+    /// One incoming message, on link `via`. A `clip`'s body comes from `body`.
+    pub async fn handle(
+        self: &Arc<Self>,
+        from: &str,
+        via: &Via,
+        msg: Msg,
+        body: impl AsyncRead + Unpin,
+    ) -> Result<(), Error> {
+        match msg {
             Msg::Hello {
                 name,
                 platform,
@@ -384,14 +416,14 @@ impl Inner {
                 ..
             } => self.on_hello(
                 from,
-                cid,
+                via,
                 clean(&name, MAX_NAME),
                 platform,
                 features.iter().any(|f| f == "metered"),
             ),
-            Msg::Clip(m) => self.on_clip(from, recv, m).await?,
+            Msg::Clip(m) => self.on_clip(from, body, m).await?,
             Msg::Offer(m) => self.on_offer(from, m),
-            Msg::Request { id } => self.on_request(from, &id),
+            Msg::Request { id } => self.on_request(from, via, &id),
             Msg::Missing { id } => self.on_missing(from, &id),
             Msg::Peers { devices } => self.on_peers(devices),
             Msg::Unpair { id } => {
@@ -407,7 +439,7 @@ impl Inner {
         Ok(())
     }
 
-    fn on_hello(self: &Arc<Self>, from: &str, cid: usize, name: String, platform: Platform, metered: bool) {
+    fn on_hello(self: &Arc<Self>, from: &str, via: &Via, name: String, platform: Platform, metered: bool) {
         let (renamed, first) = {
             let mut s = self.lock();
             let s = &mut *s;
@@ -417,8 +449,15 @@ impl Inner {
             {
                 (p.name, p.platform, renamed) = (name, platform, true);
             }
-            let first = match s.conns.get_mut(from) {
-                Some(c) if c.conn.stable_id() == cid => c.metered.replace(metered).is_none(),
+            let on_net = s.conns.contains_key(from);
+            let first = match (via, s.conns.get_mut(from), s.ble.get_mut(from)) {
+                (Via::Net(conn), Some(c), _) if c.conn.stable_id() == conn.stable_id() => {
+                    c.metered.replace(metered).is_none()
+                }
+                // Over Bluetooth only while there's no network connection: that one did the catch-up.
+                (Via::Ble(ble), _, Some(b)) if b.ble.link == ble.link => {
+                    b.metered.replace(metered).is_none() && !on_net
+                }
                 _ => false,
             };
             (renamed, first)
@@ -431,13 +470,12 @@ impl Inner {
         if first {
             let latest = {
                 let s = self.lock();
-                let latest = s.history.first().zip(s.conns.get(from)).filter(|_| !s.paused);
-                latest.map(|(meta, c)| (meta.clone(), c.conn.clone()))
+                s.history.first().filter(|_| !s.paused).cloned()
             };
-            if let Some((meta, conn)) = latest {
-                let this = self.clone();
+            if let Some(meta) = latest {
+                let (this, via) = (self.clone(), via.clone());
                 self.spawn(async move {
-                    let _ = send_item(&conn, &this.dir, &meta, metered, true).await;
+                    let _ = via.send_item(&this.dir, &meta, metered, true).await;
                 });
             }
         }
@@ -571,21 +609,27 @@ impl Inner {
         self.events.on_offer(offer);
     }
 
-    /// Sends the item asked for, or `missing` if we don't have it or are paused.
-    fn on_request(&self, from: &str, id: &str) {
-        let (meta, conn) = {
+    /// Sends the item asked for on the link the request came on, or `missing` if we don't have it, are paused, or it
+    /// can't go over that link (Bluetooth: over 1 MiB or with files).
+    fn on_request(&self, from: &str, via: &Via, id: &str) {
+        let meta = {
             let s = self.lock();
-            let meta = s.history.iter().find(|h| h.id == id).filter(|_| !s.paused).cloned();
-            let Some(conn) = s.conns.get(from).map(|c| c.conn.clone()) else {
+            if !s.peers.contains_key(from) {
                 return;
-            };
-            (meta, conn)
+            }
+            let fits = |m: &&Meta| matches!(via, Via::Net(_)) || (m.files.is_empty() && m.size() <= BLE_CAP);
+            s.history
+                .iter()
+                .find(|h| h.id == id)
+                .filter(fits)
+                .filter(|_| !s.paused)
+                .cloned()
         };
-        let (dir, id) = (self.dir.clone(), id.to_string());
+        let (dir, id, via) = (self.dir.clone(), id.to_string(), via.clone());
         self.spawn(async move {
             let _ = match meta {
-                Some(meta) => send_clip(&conn, &dir, &meta, false).await,
-                None => send_msg(&conn, &Msg::Missing { id }).await,
+                Some(meta) => via.send_clip(&dir, &meta, false).await,
+                None => via.send_msg(&Msg::Missing { id }).await,
             };
         });
     }
@@ -645,36 +689,39 @@ impl Inner {
 
     /// Tells the other connected devices about a newly paired one, so they trust it too.
     pub fn introduce(&self, peer: &PeerInfo) {
-        let conns: Vec<Connection> = self
-            .lock()
-            .conns
-            .iter()
-            .filter(|(id, _)| **id != peer.id)
-            .map(|(_, c)| c.conn.clone())
-            .collect();
-        for conn in conns {
+        let links: Vec<Via> = {
+            let s = self.lock();
+            s.links()
+                .filter(|(id, ..)| **id != peer.id)
+                .map(|(_, via, _)| via)
+                .collect()
+        };
+        for via in links {
             let msg = Msg::Peers {
                 devices: vec![peer.clone()],
             };
             self.spawn(async move {
-                let _ = send_msg(&conn, &msg).await;
+                let _ = via.send_msg(&msg).await;
             });
         }
     }
 
-    /// Forgets a device and closes its connection.
+    /// Forgets a device and closes its links.
     fn forget(&self, id: &str) {
-        let conn = {
+        let (conn, ble) = {
             let mut s = self.lock();
             if s.peers.remove(id).is_none() {
                 return;
             }
             s.removed.insert(id.to_string());
-            s.conns.remove(id)
+            (s.conns.remove(id), s.ble.remove(id))
         };
         self.save_peers();
         if let Some(c) = conn {
             c.conn.close(VarInt::from_u32(CLOSE_UNPAIRED), b"unpaired");
+        }
+        if let Some(b) = ble {
+            b.ble.close();
         }
         self.emit_devices();
     }
@@ -753,24 +800,26 @@ impl Inner {
             let mut s = self.lock();
             let forgotten = s.add_history(meta.clone());
             // Devices whose hello hasn't arrived yet get the item as their catch-up instead.
-            let targets: Vec<(Connection, bool)> = s
-                .conns
-                .values()
-                .filter_map(|c| Some((c.conn.clone(), c.metered?)))
+            let targets: Vec<(Via, bool)> = s
+                .links()
+                .filter_map(|(_, via, metered)| Some((via, metered?)))
                 .collect();
             (targets, forgotten)
         };
         drop(in_order);
         self.save_history(forgotten);
-        // Each send streams the data from disk, so sending to many devices doesn't copy it in memory.
-        let limit = transfer_limit(meta.size());
+        // Each network send streams the data from disk, so sending to many devices doesn't copy it in memory.
+        let mut limit = transfer_limit(meta.size());
+        if targets.iter().any(|(via, _)| matches!(via, Via::Ble(_))) {
+            limit = limit.max(ble_limit(meta.size().min(BLE_CAP)));
+        }
         let meta = Arc::new(meta);
         let sends: Vec<_> = targets
             .into_iter()
-            .map(|(conn, metered)| {
+            .map(|(via, metered)| {
                 let (dir, meta) = (self.dir.clone(), meta.clone());
                 self.rt
-                    .spawn(async move { send_item(&conn, &dir, &meta, metered, false).await })
+                    .spawn(async move { via.send_item(&dir, &meta, metered, false).await })
             })
             .collect();
         // Wait until each device has it, turned it down or went away. Sends still running after the limit go on.
@@ -788,7 +837,7 @@ impl Inner {
         if self.lock().history.iter().any(|h| h.id == id) {
             return self.item(id).await;
         }
-        let (rx, conn, size) = {
+        let (rx, via, size) = {
             let mut s = self.lock();
             if s.paused {
                 return Err(net("sharing is paused"));
@@ -796,24 +845,27 @@ impl Inner {
             let Some((_, from, size)) = s.offers.iter().find(|o| o.0 == id).cloned() else {
                 return Err(Error::NotFound);
             };
-            let Some(conn) = s.conns.get(&from).map(|c| c.conn.clone()) else {
+            let Some((_, via, _)) = s.links().find(|(id, ..)| **id == from) else {
                 return Err(net("the device that has it is offline"));
             };
             let (tx, rx) = oneshot::channel();
             s.fetches.entry(id.to_string()).or_default().push(tx);
-            (rx, conn, size)
+            (rx, via, size)
         };
-        let limit = transfer_limit(size);
+        let limit = match via {
+            Via::Net(_) => transfer_limit(size),
+            Via::Ble(_) => ble_limit(size.min(BLE_CAP)),
+        };
         let res = async {
-            send_msg(&conn, &Msg::Request { id: id.to_string() }).await?;
-            // The answer comes on this connection; if it closes, it won't come.
+            via.send_msg(&Msg::Request { id: id.to_string() }).await?;
+            // The answer comes on this link; if it closes, it won't come.
             tokio::select! {
                 got = tokio::time::timeout(limit, rx) => match got {
                     Err(_) => Err(net("timed out")),
                     Ok(Err(_)) => Err(net("the transfer failed")),
                     Ok(Ok(res)) => res,
                 },
-                e = conn.closed() => Err(net(e)),
+                e = via.closed() => Err(e),
             }
         };
         let res = res.await;
@@ -838,22 +890,30 @@ impl Inner {
 
     pub async fn unpair(self: &Arc<Self>, id: &str) -> Result<(), Error> {
         let id = id.parse::<PublicKey>().map_err(|_| Error::UnknownDevice)?.to_string();
-        let (conn, others) = {
+        let (conn, ble, others) = {
             let mut s = self.lock();
             if s.peers.remove(&id).is_none() {
                 return Err(Error::UnknownDevice);
             }
             s.removed.insert(id.clone());
             let conn = s.conns.remove(&id).map(|c| c.conn);
-            (conn, s.conns.values().map(|c| c.conn.clone()).collect::<Vec<_>>())
+            let ble = s.ble.remove(&id).map(|b| b.ble);
+            (conn, ble, s.links().map(|(_, via, _)| via).collect::<Vec<_>>())
         };
         self.save_peers();
         self.emit_devices();
         for other in others {
             let msg = Msg::Unpair { id: id.clone() };
             self.spawn(async move {
-                let _ = send_msg(&other, &msg).await;
+                let _ = other.send_msg(&msg).await;
             });
+        }
+        if let Some(ble) = ble {
+            if conn.is_none() {
+                let told = Msg::Unpair { id: self.id.clone() };
+                let _ = tokio::time::timeout(Duration::from_secs(3), ble.send_msg(&told)).await;
+            }
+            ble.close();
         }
         if let Some(conn) = conn {
             // Tell it we forgot it, and close once it has the message.
@@ -890,6 +950,7 @@ impl Inner {
         let conns: Vec<Conn> = {
             let mut s = self.lock();
             s.stopped = true;
+            s.ble.drain().for_each(|(_, b)| b.ble.close());
             s.conns.drain().map(|(_, c)| c).collect()
         };
         self.wake.notify_one();
@@ -949,21 +1010,65 @@ async fn bind(key: SecretKey, port: u16) -> Result<Endpoint, Error> {
         .map_err(net)
 }
 
-/// Sends an item whole, or as an offer if it's too big or the device is metered and it isn't text.
-async fn send_item(conn: &Connection, dir: &Path, meta: &Meta, metered: bool, latest: bool) -> Result<(), Error> {
-    let size = meta.size();
-    if size <= SIZE_CAP && (!metered || meta.is_text()) {
-        return send_clip(conn, dir, meta, latest).await;
+/// The link to a device: a message came on it, or goes out on it.
+#[derive(Clone)]
+pub enum Via {
+    Net(Connection),
+    Ble(Ble),
+}
+
+impl Via {
+    async fn send_msg(&self, msg: &Msg) -> Result<(), Error> {
+        match self {
+            Via::Net(conn) => send_msg(conn, msg).await,
+            Via::Ble(ble) => ble.send_msg(msg).await,
+        }
     }
-    let offer = OfferMsg {
-        id: meta.id.clone(),
-        time_ms: meta.time_ms,
-        size,
-        mimes: meta.formats.iter().map(|f| f.mime.clone()).collect(),
-        file_names: meta.files.iter().map(|f| f.name.clone()).collect(),
-        latest,
-    };
-    send_msg(conn, &Msg::Offer(offer)).await
+
+    /// Sends an item whole, or as an offer: on the network if it's too big, or the device is metered and it isn't
+    /// text; over Bluetooth if it's over 1 MiB or has files.
+    async fn send_item(&self, dir: &Path, meta: &Meta, metered: bool, latest: bool) -> Result<(), Error> {
+        let size = meta.size();
+        let whole = match self {
+            Via::Net(_) => size <= SIZE_CAP && (!metered || meta.is_text()),
+            Via::Ble(_) => size <= BLE_CAP && meta.files.is_empty(),
+        };
+        if whole {
+            return self.send_clip(dir, meta, latest).await;
+        }
+        let offer = OfferMsg {
+            id: meta.id.clone(),
+            time_ms: meta.time_ms,
+            size,
+            mimes: meta.formats.iter().map(|f| f.mime.clone()).collect(),
+            file_names: meta.files.iter().map(|f| f.name.clone()).collect(),
+            latest,
+        };
+        self.send_msg(&Msg::Offer(offer)).await
+    }
+
+    async fn send_clip(&self, dir: &Path, meta: &Meta, latest: bool) -> Result<(), Error> {
+        match self {
+            Via::Net(conn) => send_clip(conn, dir, meta, latest).await,
+            // At most 1 MiB, so it's read into memory.
+            Via::Ble(ble) => {
+                let mut frame = Vec::new();
+                write_clip(&mut frame, dir, meta, latest).await?;
+                ble.send(frame).await
+            }
+        }
+    }
+
+    /// Waits until the link closes.
+    async fn closed(&self) -> Error {
+        match self {
+            Via::Net(conn) => net(conn.closed().await),
+            Via::Ble(ble) => {
+                ble.closed().await;
+                net("the Bluetooth link closed")
+            }
+        }
+    }
 }
 
 /// Sends an item on its own stream.

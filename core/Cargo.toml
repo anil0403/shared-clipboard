@@ -28,6 +28,13 @@ blake3 = "1"
 data-encoding = "2"
 rand = "0.10"
 if-addrs = "0.15"
+# Noise for Bluetooth links, with pure Rust crypto only (no ring), so it builds the same for every app.
+snow = { version = "0.10", default-features = false, features = [
+    "use-curve25519",
+    "use-chacha20poly1305",
+    "use-blake2",
+    "use-getrandom",
+] }
 
 [dev-dependencies]
 tempfile = "3"

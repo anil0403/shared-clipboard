@@ -141,6 +141,7 @@ pub async fn pair_device(inner: &Arc<Inner>, id: &str) -> Result<Device, Error> 
         name,
         platform,
         online: true,
+        bluetooth: false,
     };
     if !confirm(inner, device, code, &mut send, &mut recv).await? {
         return Err(Error::PairingRejected);
@@ -186,6 +187,7 @@ fn joined(inner: &Arc<Inner>, id: PublicKey, addrs: &[SocketAddr], reply: PairMs
         name,
         platform,
         online: false,
+        bluetooth: false,
     })
 }
 
@@ -276,6 +278,7 @@ async fn check(
                 name: clean(&name, MAX_NAME),
                 platform,
                 online: true,
+                bluetooth: false,
             };
             Ok(confirm(inner, device, code, send, recv)
                 .await?

@@ -4,12 +4,16 @@
 
 uniffi::setup_scaffolding!();
 
+mod bluetooth;
 mod node;
 mod pairing;
 mod protocol;
 mod store;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+
+pub use bluetooth::{BluetoothLink, BluetoothSink};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// The wire protocol version sent in `Hello`. Not the release version (VERSIONING.md).
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -44,7 +48,10 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub platform: Platform,
+    /// Connected over the network or Bluetooth.
     pub online: bool,
+    /// Connected only over Bluetooth: small items arrive, bigger ones and files come as offers.
+    pub bluetooth: bool,
 }
 
 /// One representation of a clipboard item, e.g. `text/plain;charset=utf-8` or `image/png`.
@@ -240,8 +247,48 @@ impl Node {
         self.inner.lock().paused = paused;
     }
 
+    /// Runs a Bluetooth link over an L2CAP channel the app opened (`docs/protocol.md`): the core writes to the socket
+    /// through `sink`, and the app passes what it reads to the returned link. The phone (central) is the `initiator`.
+    /// The link is used only while the device has no network connection.
+    pub fn bluetooth_open(&self, sink: Arc<dyn BluetoothSink>, initiator: bool) -> Arc<BluetoothLink> {
+        self.inner.bluetooth_open(sink, initiator)
+    }
+
+    /// Whether to look for devices over Bluetooth: some paired device isn't connected over the network.
+    pub fn bluetooth_wanted(&self) -> bool {
+        self.inner.lock().bluetooth_wanted()
+    }
+
     /// Closes all connections. The node can't be used afterwards.
     pub async fn stop(&self) {
         self.inner.stop().await
     }
+}
+
+impl Node {
+    /// Runs a Bluetooth link on `stream` (an L2CAP channel) in the background until it closes, like `bluetooth_open`.
+    pub fn bluetooth_link<S>(self: &Arc<Self>, stream: S, initiator: bool)
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        self.inner.bluetooth_link(stream, initiator)
+    }
+
+    /// For tests: Bluetooth links opened afterwards close after `idle` without receiving anything (normally 150 s).
+    #[doc(hidden)]
+    pub fn set_bluetooth_idle(&self, idle: Duration) {
+        self.inner.lock().ble_idle = idle;
+    }
+}
+
+/// The Bluetooth LE service the desktops advertise.
+#[uniffi::export]
+pub fn bluetooth_service_uuid() -> String {
+    bluetooth::SERVICE_UUID.into()
+}
+
+/// The characteristic in that service whose value is the L2CAP PSM to connect to, 2 bytes little-endian.
+#[uniffi::export]
+pub fn bluetooth_psm_uuid() -> String {
+    bluetooth::PSM_UUID.into()
 }
