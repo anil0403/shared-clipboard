@@ -23,13 +23,14 @@ import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
 import androidx.core.content.edit
 import androidx.core.content.IntentCompat
-import androidx.lifecycle.lifecycleScope
 import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Format
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.InputStream
+import java.util.UUID
 import com.noobsbot.sharedclip.core.File as ClipFile
 
 private const val LABEL = "Shared Clipboard"
@@ -88,7 +89,7 @@ private fun Context.saveDownload(file: ClipFile): Uri? = try {
  * Sends what's on the clipboard, unless it's marked sensitive. Android lets only the app in focus read it.
  * [auto] sends (while our screen is open) skip items we put there and the item already sent, even after a restart.
  */
-suspend fun Context.sendClipboard(auto: Boolean) {
+fun Context.sendClipboard(auto: Boolean) {
     val clip = getSystemService(ClipboardManager::class.java).primaryClip ?: return
     val desc = clip.description
     if (desc.extras?.getBoolean(SENSITIVE) == true) {
@@ -105,44 +106,74 @@ suspend fun Context.sendClipboard(auto: Boolean) {
     send(items.firstNotNullOfOrNull { it.text }, items.firstNotNullOfOrNull { it.htmlText }, items.mapNotNull { it.uri })
 }
 
-/** Reads the text, HTML and content URIs and hands them to the core. Reads them now, while we may. */
-suspend fun Context.send(text: CharSequence?, html: String?, uris: List<Uri>) {
-    val formats = mutableListOf<Format>()
-    val files = mutableListOf<ClipFile>()
+/** A shared file or image, opened while we were allowed to read it. */
+private class Part(val mime: String?, val name: String?, val input: InputStream)
+
+/**
+ * Hands text, HTML and content URIs to the core. Opens the URIs now, while we may read them, and copies them in the
+ * background, so the screen that called this can close right away.
+ */
+fun Context.send(text: CharSequence?, html: String?, uris: List<Uri>) {
+    val parts = mutableListOf<Part>()
     try {
-        withContext(Dispatchers.IO) {
-            text?.let { formats += Format("text/plain;charset=utf-8", it.toString().encodeToByteArray()) }
-            html?.let { formats += Format("text/html", it.encodeToByteArray()) }
-            for (uri in uris) {
-                // Other apps can name any URI, and we'd read it with our own rights: file:// could be our device key.
-                if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority == "$packageName.files") {
-                    throw SecurityException("only shared files can be sent")
-                }
-                val mime = contentResolver.getType(uri)
-                if (mime == "image/png" || mime == "image/jpeg") {
-                    formats += Format(mime, contentResolver.openInputStream(uri)!!.use { it.readBytes() })
-                } else {
-                    files += cacheFile(uri)
-                }
+        for (uri in uris) {
+            // Other apps can name any URI, and we'd read it with our own rights: file:// could be our device key.
+            if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority == "$packageName.files") {
+                throw SecurityException("only shared files can be sent")
             }
+            val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null }
+            parts += Part(contentResolver.getType(uri), name, contentResolver.openInputStream(uri)!!)
         }
     } catch (e: Exception) {
+        parts.forEach { it.input.close() }
         return toast("Couldn't read it: ${e.message}")
     }
-    if (formats.isNotEmpty() || files.isNotEmpty()) call { it.copy(formats, files) }
+    val app = applicationContext
+    Shared.scope.launch {
+        val formats = mutableListOf<Format>()
+        val files = mutableListOf<ClipFile>()
+        try {
+            withContext(Dispatchers.IO) {
+                text?.let { formats += Format("text/plain;charset=utf-8", it.toString().encodeToByteArray()) }
+                html?.let { formats += Format("text/html", it.encodeToByteArray()) }
+                for (part in parts) {
+                    if (part.mime == "image/png" || part.mime == "image/jpeg") {
+                        formats += Format(part.mime, part.input.readBytes())
+                    } else {
+                        files += app.keepFile(part)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            return@launch app.toast("Couldn't read it: ${e.message}")
+        } finally {
+            parts.forEach { runCatching { it.input.close() } }
+        }
+        if (formats.isNotEmpty() || files.isNotEmpty()) app.call { it.copy(formats, files) }
+    }
 }
 
-/** Copies a shared file into the cache, because the core reads files by path. */
-// ponytail: a later file with the same name replaces it, and Android may clear the cache before an
-// offered item is fetched. Copy into filesDir instead if the core doesn't keep its own copy.
-private fun Context.cacheFile(uri: Uri): ClipFile {
-    val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-        ?.use { if (it.moveToFirst()) it.getString(0) else null }
+/**
+ * Copies a shared file into a folder of its own in filesDir/send, because the core reads files by path for as long
+ * as the item is in the history. [deleteUnsent] deletes the folder once it isn't.
+ */
+private fun Context.keepFile(part: Part): ClipFile {
     // The name comes from another app: keep the file inside our folder.
-    val safe = File(name ?: "file").name.takeUnless { it.trim('.').isBlank() } ?: "file"
-    val file = File(File(cacheDir, "send").apply { mkdirs() }, safe)
-    contentResolver.openInputStream(uri)!!.use { input -> file.outputStream().use { input.copyTo(it) } }
-    return ClipFile(safe, file.path, file.length().toULong())
+    val name = File(part.name ?: "file").name.takeUnless { it.trim('.').isBlank() } ?: "file"
+    val dir = File(File(filesDir, "send"), UUID.randomUUID().toString()).apply { mkdirs() }
+    val file = File(dir, name)
+    file.outputStream().use { part.input.copyTo(it) }
+    return ClipFile(name, file.path, file.length().toULong())
+}
+
+/** Deletes the shared files that aren't in the history any more; [kept] are the paths of those that are. */
+fun Context.deleteUnsent(kept: List<String>) {
+    val dirs = kept.mapTo(HashSet()) { File(it).parent }
+    // ponytail: spares the last hour's folders, as a send may still be copying into one before the core has the
+    // item. Track the sends in progress if an hour is ever too short.
+    val old = System.currentTimeMillis() - 3_600_000
+    File(filesDir, "send").listFiles()?.forEach { if (it.path !in dirs && it.lastModified() < old) it.deleteRecursively() }
 }
 
 /** Opens SendActivity to send the clipboard. Only we can: the alias isn't exported (AndroidManifest.xml). */
@@ -155,6 +186,8 @@ class SendActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Re-created (after a rotation, say) once it had sent: don't send again.
+        started = savedInstanceState?.getBoolean("started") == true
         val i = intent
         when (i.action) {
             Intent.ACTION_SEND -> once {
@@ -178,16 +211,21 @@ class SendActivity : ComponentActivity() {
         if (hasFocus && clipboard) once { sendClipboard(auto = false) }
     }
 
-    private fun once(block: suspend () -> Unit) {
-        if (started) return
-        started = true
-        lifecycleScope.launch {
-            // Always close: an invisible window left open would block the screen.
-            try {
-                block()
-            } finally {
-                finish()
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean("started", started)
+    }
+
+    /** Sends once and closes right away: [send] only opens what it sends, the copying goes on in the background. */
+    private fun once(send: () -> Unit) {
+        // Always close: an invisible window left open would block the screen.
+        try {
+            if (!started) {
+                started = true
+                send()
             }
+        } finally {
+            finish()
         }
     }
 }

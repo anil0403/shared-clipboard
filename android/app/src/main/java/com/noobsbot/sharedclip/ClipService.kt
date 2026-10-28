@@ -35,6 +35,7 @@ import com.noobsbot.sharedclip.core.Events
 import com.noobsbot.sharedclip.core.Node
 import com.noobsbot.sharedclip.core.Offer
 import com.noobsbot.sharedclip.core.Platform
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
@@ -124,6 +125,8 @@ class ClipService : Service() {
                 advertise(node)
                 Shared.node = node
                 Shared.error = null
+                val sent = node.history().flatMap { it.files }.map { it.path }
+                launch(Dispatchers.IO) { deleteUnsent(sent) }
             } catch (e: Exception) {
                 Log.e(TAG, "The core didn't start", e)
                 Shared.error = e.message ?: e.toString()

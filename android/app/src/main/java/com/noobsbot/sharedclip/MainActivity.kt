@@ -56,7 +56,6 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
-import androidx.lifecycle.lifecycleScope
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
@@ -102,9 +101,7 @@ class MainActivity : ComponentActivity() {
         if (hasFocus) autoSend()
     }
 
-    private fun autoSend() {
-        lifecycleScope.launch { sendClipboard(auto = true) }
-    }
+    private fun autoSend() = sendClipboard(auto = true)
 }
 
 @Composable
