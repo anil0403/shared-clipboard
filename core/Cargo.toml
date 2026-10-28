@@ -31,3 +31,8 @@ if-addrs = "0.15"
 
 [dev-dependencies]
 tempfile = "3"
+
+# ponytail: libc 0.2.190 made `in6_ifreq` macOS-only, but netdev 0.46 (iroh's netwatch) uses it on iOS too. Drop this
+# pin once netdev or libc fixes that.
+[target.'cfg(target_os = "ios")'.dependencies]
+libc = "=0.2.189"
