@@ -70,5 +70,15 @@ check "paused B gets nothing" "$URI" "$(on b wl-paste -n -t text/uri-list | head
 on b "$BIN" resume
 on b "$BIN" unpair "$NAME"; sleep 1
 check "unpair reaches A" "No paired devices. Pair one with: sharedclip pair" "$(on a "$BIN" devices)"
+
+# Pair again by code: B picks A from the nearby list, both see the code and accept.
+printf 'y\n' | on a timeout 30 "$BIN" pair > "$W/a/code.out" 2>&1 &
+PAIR=$!
+sleep 1
+printf 'y\n' | on b timeout 30 "$BIN" pair --nearby 1 > "$W/b/code.out" 2>&1
+wait $PAIR
+grep -o 'Pairing code with .*' "$W/a/code.out" "$W/b/code.out"
+check "code pairing on B" "Paired with $NAME" "$(grep -o "Paired with .*" "$W/b/code.out")"
+check "code pairing on A" "Paired with $NAME" "$(grep -o "Paired with .*" "$W/a/code.out")"
 [ $FAILED = 0 ] && echo "all passed" || echo "some checks FAILED"
 exit $FAILED
