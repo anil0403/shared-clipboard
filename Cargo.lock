@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "sharedclip-core"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -2861,7 +2861,7 @@ dependencies = [
 
 [[package]]
 name = "sharedclip-linux"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "mdns-sd",
  "qrcode",
