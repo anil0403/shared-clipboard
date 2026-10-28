@@ -66,6 +66,7 @@ pub fn watch(mut watcher: Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> pas
             continue;
         };
         if mime_types.iter().any(|m| m == SECRET) {
+            is_new(0); // the clipboard changed: copying the last item again afterwards is sent
             continue;
         }
         let mut read = |mime: &str| {
@@ -75,21 +76,25 @@ pub fn watch(mut watcher: Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> pas
             }
             data.filter(|d| !d.is_empty())
         };
-        let formats: Vec<Format> = pick(&mime_types)
-            .into_iter()
-            .filter_map(|(from, to)| {
-                Some(Format {
-                    mime: to.into(),
-                    data: read(from)?,
-                })
-            })
-            .collect();
         let mut files = Vec::new();
         if mime_types.iter().any(|m| m == "text/uri-list") {
             files = read("text/uri-list")
                 .map(|d| parse_uri_list(&String::from_utf8_lossy(&d)))
                 .unwrap_or_default();
         }
+        // File managers also offer the paths as text; a copied file goes as a file only.
+        let formats: Vec<Format> = match files.is_empty() {
+            true => pick(&mime_types)
+                .into_iter()
+                .filter_map(|(from, to)| {
+                    Some(Format {
+                        mime: to.into(),
+                        data: read(from)?,
+                    })
+                })
+                .collect(),
+            false => Vec::new(),
+        };
         if is_new(hash(&formats, &files)) && !first && !(formats.is_empty() && files.is_empty()) {
             send(formats, files);
         }
