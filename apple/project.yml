@@ -96,6 +96,7 @@ targets:
       - Shared/ClipModel.swift
       - Shared/Bonjour.swift
       - Shared/Clipboard.swift
+      - Shared/PeerLink.swift
       - Generated/SharedClipCore.swift
     dependencies:
       - framework: SharedClipCore.xcframework
