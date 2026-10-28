@@ -60,10 +60,10 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
-import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Device
 import com.noobsbot.sharedclip.core.Offer
 import com.noobsbot.sharedclip.core.Platform
+import com.noobsbot.sharedclip.core.Summary
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -221,17 +221,22 @@ private fun OfferRow(offer: Offer) {
 }
 
 @Composable
-private fun HistoryRow(clip: Clip) {
+private fun HistoryRow(clip: Summary) {
     val context = LocalContext.current
     val from = if (clip.from == Shared.node?.id()) "This device" else Shared.devices.find { it.id == clip.from }?.name
     ListItem(
-        headlineContent = { Text(clip.preview(), maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        headlineContent = {
+            val preview = clip.text ?: clip.files.joinToString { it.name }
+                .ifEmpty { if (clip.mimes.any { it.startsWith("image/") }) "Image" else "Item" }
+            Text(preview, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        },
         supportingContent = { Text(from ?: "Another device") },
         trailingContent = if (clip.files.isEmpty()) null else {
             { TextButton({ Shared.scope.launch { context.saveDownloads(clip.files) } }) { Text("Save") } }
         },
         modifier = Modifier.clickable(onClickLabel = "Copy") {
-            Shared.scope.launch { runCatching { context.writeClip(clip) }.onFailure { context.toast("Couldn't copy it") } }
+            val node = Shared.node ?: return@clickable
+            Shared.scope.launch { runCatching { context.writeClip(node.item(clip.id)) }.onFailure { context.toast("Couldn't copy it") } }
         },
     )
 }
@@ -320,10 +325,6 @@ private fun Platform.label() = when (this) {
     Platform.ANDROID -> "Android"
     Platform.IOS -> "iOS"
 }
-
-private fun Clip.preview() =
-    formats.firstOrNull { it.mime.startsWith("text/plain") }?.data?.decodeToString()?.take(300)
-        ?: files.joinToString { it.name }.ifEmpty { if (formats.any { it.mime.startsWith("image/") }) "Image" else "Item" }
 
 private fun qrCode(text: String): Bitmap {
     val m = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, 512, 512)
