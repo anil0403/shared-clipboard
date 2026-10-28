@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -28,7 +27,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import com.noobsbot.sharedclip.core.Clip
 import com.noobsbot.sharedclip.core.Config
@@ -129,10 +127,6 @@ class ClipService : Service() {
                 return@launch
             }
             cm.registerNetworkCallback(wifiRequest, wifiCallback, Handler(mainLooper))
-            ContextCompat.registerReceiver(
-                this@ClipService, dataSaver, IntentFilter(ConnectivityManager.ACTION_RESTRICT_BACKGROUND_CHANGED),
-                ContextCompat.RECEIVER_NOT_EXPORTED,
-            )
             updateMetered()
             update()
         }
@@ -159,7 +153,6 @@ class ClipService : Service() {
         Shared.node?.let { node ->
             Shared.node = null
             cm.unregisterNetworkCallback(wifiCallback)
-            unregisterReceiver(dataSaver)
             nsd.unregisterService(registration)
             stopDiscovery()
             cm.bindProcessToNetwork(null)
@@ -388,16 +381,11 @@ class ClipService : Service() {
         }
     }
 
-    private val dataSaver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) = updateMetered()
-    }
-
-    /** Metered Wi-Fi, mobile data and Data Saver all count as metered. */
+    /** Metered Wi-Fi and mobile data count as metered. Data Saver doesn't: it limits other apps' background use. */
     private fun updateMetered() {
-        val dataSaver = cm.restrictBackgroundStatus == ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED
         val metered = wifiCaps?.let { !it.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) }
             ?: cm.isActiveNetworkMetered
-        Shared.node?.setMetered(metered || dataSaver)
+        Shared.node?.setMetered(metered)
     }
 
     companion object {
