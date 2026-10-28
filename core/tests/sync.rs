@@ -330,8 +330,13 @@ async fn catch_up_on_reconnect() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_that_went_away_is_dialed_again() {
-    let (a, b, _da, db) = two().await;
-    let (b_id, port) = (b.id.clone(), b.node.port());
+    // One port for both IPv4 and IPv6 (port 0 gives each its own), so B comes back at every address A knows.
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let port = free_port();
+    let a = start(da.path(), "A").await;
+    let b = start_on(db.path(), "B", port).await;
+    pair(&a, &b).await;
+    let b_id = b.id.clone();
     b.node.stop().await;
     drop(b);
     wait_until(|| !online(&a, &b_id)).await;

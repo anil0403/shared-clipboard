@@ -54,13 +54,26 @@ pub async fn start_on(dir: &Path, name: &str, port: u16) -> Dev {
         devices: devices_tx,
         codes: codes_tx,
     };
-    let config = Config {
+    let events = Arc::new(events);
+    let config = || Config {
         data_dir: dir.to_string_lossy().into_owned(),
         name: name.into(),
         platform: Platform::Linux,
         port,
     };
-    let node = Node::start(config, Arc::new(events)).await.unwrap();
+    // A node stopped a moment ago can still hold its port (its last tasks drop the sockets), so wait for it.
+    let mut tries = 0;
+    let node = loop {
+        match Node::start(config(), events.clone()).await {
+            Ok(node) => break node,
+            Err(e) if port != 0 && tries < 50 => {
+                tries += 1;
+                eprintln!("port {port} not free yet: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
     Dev {
         id: node.id(),
         node,
