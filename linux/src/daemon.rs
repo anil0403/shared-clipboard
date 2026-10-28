@@ -119,6 +119,12 @@ impl Events for Hooks {
 }
 
 pub fn run() {
+    // A panic on any thread stops the daemon, so systemd restarts it instead of leaving it up but not syncing.
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        std::process::exit(101);
+    }));
     clip::use_trusted_socket();
     let watcher = match clip::watcher() {
         Ok(watcher) => watcher,
