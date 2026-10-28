@@ -174,7 +174,7 @@ fn joined(inner: &Arc<Inner>, id: PublicKey, addrs: &[SocketAddr], reply: PairMs
         platform,
         addrs,
     };
-    inner.add_peers(vec![peer]);
+    inner.add_paired(peer);
     let introduced = inner.add_peers(devices);
     inner.emit_devices();
     inner.connect(&id.to_string());
@@ -212,7 +212,7 @@ pub async fn respond(inner: Arc<Inner>, conn: Connection, addr: Option<SocketAdd
                 .filter(|p| p.id != peer.id)
                 .cloned()
                 .collect();
-            inner.add_peers(vec![peer.clone()]);
+            inner.add_paired(peer.clone());
             PairMsg::Paired {
                 name: inner.name.clone(),
                 platform: inner.platform,

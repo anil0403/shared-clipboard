@@ -109,3 +109,5 @@ B commits to its nonce before seeing A's, so someone in the middle can't pick no
 - `unpair` from a paired device removes the device it names.
 - When the user unpairs a device, the core sends `unpair` with that device's id to its other connected devices, and
   `unpair` with its own id to the removed one, then closes the connection. Devices that are offline then aren't told.
+- A device remembers the devices it removed (by its user or by `unpair`) and ignores them in `peers` and `paired`, so
+  a device that was offline can't bring them back. Only pairing with that device directly again trusts it again.

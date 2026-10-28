@@ -51,6 +51,8 @@ pub struct Inner {
     /// The runtime `start` ran on; sync methods spawn their work here.
     rt: tokio::runtime::Handle,
     state: Mutex<State>,
+    /// Held while writing the state's files, so the last write has the newest state.
+    saving: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -78,6 +80,8 @@ pub struct State {
     /// The user's answer to a pairing code, by device id.
     pub confirms: HashMap<String, oneshot::Sender<bool>>,
     stopped: bool,
+    /// Devices the user unpaired: another device listing them (`peers`, `paired`) doesn't bring them back.
+    removed: HashSet<String>,
 }
 
 struct Conn {
@@ -120,6 +124,7 @@ impl Inner {
         let port = ep.bound_sockets().iter().find(|a| a.is_ipv4()).map_or(0, |a| a.port());
         let state = State {
             peers: store::load_peers(&dir).into_iter().map(|p| (p.id.clone(), p)).collect(),
+            removed: store::load_removed(&dir),
             history: store::load_history(&dir),
             ..Default::default()
         };
@@ -133,6 +138,7 @@ impl Inner {
             dir,
             rt,
             state: Mutex::new(state),
+            saving: Mutex::new(()),
         });
         inner.spawn(inner.clone().accept_loop());
         let ids: Vec<String> = inner.lock().peers.keys().cloned().collect();
@@ -148,6 +154,16 @@ impl Inner {
 
     pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         self.rt.spawn(task);
+    }
+
+    /// Saves the paired and unpaired devices. Call it without the state lock.
+    fn save_peers(&self) {
+        let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let (peers, removed) = {
+            let s = self.lock();
+            (s.peers.values().cloned().collect::<Vec<_>>(), s.removed.clone())
+        };
+        store::save_peers(&self.dir, &peers, &removed);
     }
 
     pub fn emit_devices(&self) {
@@ -214,40 +230,42 @@ impl Inner {
                 id.clone()
             }
         };
-        let came_online = {
+        let (came_online, moved) = {
             let mut s = self.lock();
             let s = &mut *s;
             let Some(peer) = s.peers.get_mut(&id).filter(|_| !s.stopped) else {
                 conn.close(VarInt::from_u32(CLOSE_NOT_PAIRED), b"not paired");
                 return;
             };
-            if let Some(addr) = addr
-                && remember(&mut peer.addrs, addr)
-            {
-                store::save_peers(&self.dir, s.peers.values());
-            }
+            let moved = addr.is_some_and(|a| remember(&mut peer.addrs, a));
             // Two connections: keep the one opened by the lower id (or the newer, if one device opened both).
             let old = s
                 .conns
                 .get(&id)
                 .map(|c| c.conn.clone())
                 .filter(|c| c.close_reason().is_none());
-            if let Some(old) = &old {
-                if opener(old) < opener(&conn) {
+            match &old {
+                Some(old) if opener(old) < opener(&conn) => {
                     conn.close(VarInt::from_u32(CLOSE_DUPLICATE), b"duplicate");
-                    return;
+                    (None, moved)
                 }
-                old.close(VarInt::from_u32(CLOSE_DUPLICATE), b"duplicate");
+                _ => {
+                    if let Some(old) = &old {
+                        old.close(VarInt::from_u32(CLOSE_DUPLICATE), b"duplicate");
+                    }
+                    let c = Conn {
+                        conn: conn.clone(),
+                        metered: None,
+                    };
+                    s.conns.insert(id.clone(), c);
+                    (Some(old.is_none()), moved)
+                }
             }
-            s.conns.insert(
-                id.clone(),
-                Conn {
-                    conn: conn.clone(),
-                    metered: None,
-                },
-            );
-            old.is_none()
         };
+        if moved {
+            self.save_peers();
+        }
+        let Some(came_online) = came_online else { return };
         if came_online {
             self.emit_devices();
         }
@@ -334,7 +352,6 @@ impl Inner {
                 && (p.name != name || p.platform != platform)
             {
                 (p.name, p.platform, renamed) = (name, platform, true);
-                store::save_peers(&self.dir, s.peers.values());
             }
             let first = match s.conns.get_mut(from) {
                 Some(c) if c.conn.stable_id() == cid => c.metered.replace(metered).is_none(),
@@ -343,6 +360,7 @@ impl Inner {
             (renamed, first)
         };
         if renamed {
+            self.save_peers();
             self.emit_devices();
         }
         // Catch-up: once we know what the device accepts, send it our newest item.
@@ -489,14 +507,21 @@ impl Inner {
         }
     }
 
-    /// Trusts these devices. Known ones only get their addresses updated. Returns the ids that are new.
+    /// The user paired with this device directly: trust it, even if it was unpaired before.
+    pub fn add_paired(&self, peer: PeerInfo) {
+        self.lock().removed.remove(&peer.id);
+        self.add_peers(vec![peer]);
+    }
+
+    /// Trusts these devices, except ones the user unpaired. Known ones only get their addresses updated. Returns the
+    /// ids that are new.
     pub fn add_peers(&self, devices: Vec<PeerInfo>) -> Vec<String> {
         let mut added = Vec::new();
         let mut s = self.lock();
         for mut d in devices {
             let Ok(key) = d.id.parse::<PublicKey>() else { continue };
             d.id = key.to_string();
-            if d.id == self.id {
+            if d.id == self.id || s.removed.contains(&d.id) {
                 continue;
             }
             d.name = clean(&d.name, MAX_NAME);
@@ -510,7 +535,8 @@ impl Inner {
                 }
             }
         }
-        store::save_peers(&self.dir, s.peers.values());
+        drop(s);
+        self.save_peers();
         added
     }
 
@@ -540,9 +566,10 @@ impl Inner {
             if s.peers.remove(id).is_none() {
                 return;
             }
-            store::save_peers(&self.dir, s.peers.values());
+            s.removed.insert(id.to_string());
             s.conns.remove(id)
         };
+        self.save_peers();
         if let Some(c) = conn {
             c.conn.close(VarInt::from_u32(CLOSE_UNPAIRED), b"unpaired");
         }
@@ -557,23 +584,23 @@ impl Inner {
         if id == self.id {
             return;
         }
-        let dial = {
+        let (new, dial) = {
             let mut s = self.lock();
             let s = &mut *s;
             match s.peers.get_mut(&id) {
                 Some(peer) => {
                     let new = remember(&mut peer.addrs, addr);
-                    if new {
-                        store::save_peers(&self.dir, s.peers.values());
-                    }
-                    new || !s.conns.contains_key(&id)
+                    (new, new || !s.conns.contains_key(&id))
                 }
                 None => {
                     remember(s.found.entry(id.clone()).or_default(), addr);
-                    false
+                    (false, false)
                 }
             }
         };
+        if new {
+            self.save_peers();
+        }
         if dial {
             self.connect(&id);
         }
@@ -665,10 +692,11 @@ impl Inner {
             if s.peers.remove(&id).is_none() {
                 return Err(Error::UnknownDevice);
             }
-            store::save_peers(&self.dir, s.peers.values());
+            s.removed.insert(id.clone());
             let conn = s.conns.remove(&id).map(|c| c.conn);
             (conn, s.conns.values().map(|c| c.conn.clone()).collect::<Vec<_>>())
         };
+        self.save_peers();
         self.emit_devices();
         for other in others {
             let msg = Msg::Unpair { id: id.clone() };

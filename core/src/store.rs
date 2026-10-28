@@ -1,6 +1,6 @@
 //! What the core keeps in `data_dir`: the key, paired devices, history and received files.
 
-use std::{fs, io::Write, path::Path};
+use std::{collections::HashSet, fs, io::Write, path::Path};
 
 use iroh::SecretKey;
 use serde::{Deserialize, Serialize};
@@ -45,8 +45,14 @@ pub fn load_peers(dir: &Path) -> Vec<PeerInfo> {
     read_json(&dir.join("peers.json"))
 }
 
-pub fn save_peers<'a>(dir: &Path, peers: impl Iterator<Item = &'a PeerInfo>) {
-    write_json(&dir.join("peers.json"), &peers.collect::<Vec<_>>());
+/// Ids of devices the user unpaired.
+pub fn load_removed(dir: &Path) -> HashSet<String> {
+    read_json(&dir.join("removed.json"))
+}
+
+pub fn save_peers(dir: &Path, peers: &[PeerInfo], removed: &HashSet<String>) {
+    write_json(&dir.join("peers.json"), &peers);
+    write_json(&dir.join("removed.json"), removed);
 }
 
 /// A history item in `history.json`; its formats' data is in `history/<id>`, one after another.

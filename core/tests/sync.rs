@@ -317,6 +317,22 @@ async fn unpair_spreads() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_unpaired_device_stays_out_until_paired_again() {
+    let (a, c, _da, _dc) = two().await;
+    a.node.unpair(c.id.clone()).await.unwrap();
+    // D pairs with C, then A joins D: D lists C, but A doesn't take it back.
+    let dd = tempdir().unwrap();
+    let d = start(dd.path(), "D").await;
+    pair(&c, &d).await;
+    pair(&d, &a).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!paired(&a, &c.id));
+    // Pairing with C directly trusts it again.
+    pair(&c, &a).await;
+    assert!(paired(&a, &c.id) && paired(&c, &a.id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn metered_devices_get_offers_for_images() {
     let (a, mut b, _da, _db) = two().await;
     b.node.set_metered(true);
