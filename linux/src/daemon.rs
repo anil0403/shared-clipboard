@@ -51,10 +51,13 @@ impl App {
         self.node.get().expect("node started")
     }
 
-    /// Answers the pending code for `id`, once: the user, or the timeout.
-    fn answer(&self, id: &str, accept: bool) {
+    /// Answers the pending code for `id`, once: the user, or the timeout of that `code` (not of a newer one).
+    fn answer(&self, id: &str, code: Option<&str>, accept: bool) {
         let mut pending = self.pending.lock().unwrap();
-        if pending.as_ref().is_some_and(|(d, _)| d.id == id) {
+        if pending
+            .as_ref()
+            .is_some_and(|(d, c)| d.id == id && code.is_none_or(|code| code == c))
+        {
             *pending = None;
             self.node().confirm_pairing(id.into(), accept);
         }
@@ -109,11 +112,11 @@ impl Events for Hooks {
             device.name
         );
         *self.0.pending.lock().unwrap() = Some((device.clone(), code.clone()));
-        let _ = self.0.events.send(Ev::Code(device.clone(), code));
+        let _ = self.0.events.send(Ev::Code(device.clone(), code.clone()));
         let app = self.0.clone();
         self.0.rt.spawn(async move {
             tokio::time::sleep(CODE_TIMEOUT).await;
-            app.answer(&device.id, false);
+            app.answer(&device.id, Some(&code), false);
         });
     }
 }
@@ -439,7 +442,7 @@ async fn session(
                 Err(_) => {} // lagged: missed some events
             },
             answer = lines.next_line() => match answer?.as_deref().and_then(|a| a.split_once(' ')) {
-                Some((yes, id)) => app.answer(id, yes == "y"),
+                Some((yes, id)) => app.answer(id, None, yes == "y"),
                 None => return Ok(()), // the CLI left (Ctrl-C)
             },
         }
