@@ -9,8 +9,8 @@ options:
 settings:
   base:
     # Set by CI (.github/set-version.sh), never by hand: see VERSIONING.md.
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1000099"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "1010099"
     SWIFT_VERSION: "5.0"
     # The core is built for Apple silicon simulators only.
     "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
