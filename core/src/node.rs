@@ -403,6 +403,10 @@ impl Inner {
             let mut s = self.lock();
             let waiters = s.fetches.remove(&clip.id);
             if waiters.is_none() && (s.paused || (m.latest && !s.is_newer(clip.time_ms))) {
+                // Paused, or something newer came meanwhile: drop what we saved, unless the history has it.
+                if !s.history.iter().any(|c| c.id == clip.id) {
+                    store::forget(&self.dir, &clip.id);
+                }
                 return Ok(());
             }
             s.last_delivered = Some(clip.id.clone());
