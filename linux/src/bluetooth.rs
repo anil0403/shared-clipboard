@@ -25,6 +25,9 @@ type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Runs until dropped. Dropping it closes the listener and removes the advertisement and the GATT service.
 pub async fn run(node: Arc<Node>) {
+    if std::env::var_os("SHAREDCLIP_NO_BLUETOOTH").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
     let mut log = Log::default();
     loop {
         let Err(err) = watch(&node, &mut log).await;

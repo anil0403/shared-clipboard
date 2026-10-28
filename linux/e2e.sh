@@ -31,7 +31,8 @@ for s in a b; do
 done
 for _ in $(seq 50); do [ -S "$RA/$SOCK" ] && [ -S "$RB/$SOCK" ] && break; sleep 0.2; done
 DAEMONS=()
-for s in a b; do on $s "$BIN" daemon > "$W/$s/daemon.log" 2>&1 & DAEMONS+=($!); done
+# No Bluetooth: it would advertise on this computer's real adapter.
+for s in a b; do on $s env SHAREDCLIP_NO_BLUETOOTH=1 "$BIN" daemon >"$W/$s/daemon.log" 2>&1 & DAEMONS+=($!); done
 for _ in $(seq 50); do [ -S "$RA/sharedclip.sock" ] && [ -S "$RB/sharedclip.sock" ] && break; sleep 0.2; done
 sleep 3
 cat "$W/a/daemon.log" "$W/b/daemon.log"

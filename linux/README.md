@@ -31,6 +31,8 @@ and files wait for the network. For this:
   never turns it on; it waits, and starts as soon as you turn Bluetooth on;
 - the phone must be paired first, over the network (see Pair). There's no Bluetooth pairing.
 
+To leave Bluetooth out, run the service with `SHAREDCLIP_NO_BLUETOOTH=1`.
+
 ## noobsbot-desktop
 noobsbot-desktop offers clipboard control only on its trusted socket (`$WAYLAND_DISPLAY-trusted`). The service
 connects there by itself when the socket exists; nothing else is needed. Run by hand, `sharedclip daemon` works as
