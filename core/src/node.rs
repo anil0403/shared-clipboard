@@ -10,7 +10,10 @@ use std::{
 
 use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey, TransportAddr,
-    endpoint::{BindOpts, Connection, ConnectionError, IncomingAddr, RecvStream, Side, VarInt, presets},
+    endpoint::{
+        BindOpts, Connection, ConnectionError, IdleTimeout, IncomingAddr, QuicTransportConfig, RecvStream, Side,
+        VarInt, presets,
+    },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -813,8 +816,18 @@ impl Inner {
 /// connect only to addresses we were given.
 async fn bind(key: SecretKey, port: u16) -> Result<Endpoint, Error> {
     let v6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
+    // At most 4 messages at once from each device: a device that reads slowly makes the sender wait (QUIC flow
+    // control) instead of piling up streams. The cost: a 5th message waits until one of the 4 is done, so small
+    // messages can queue behind big items. Keep-alive every 25 s; a device silent for 60 s is gone. iroh keeps its own
+    // per-path settings (keep-alive 5 s, idle 15 s at most), which it doesn't let us raise.
+    let transport = QuicTransportConfig::builder()
+        .max_concurrent_uni_streams(VarInt::from_u32(4))
+        .keep_alive_interval(Duration::from_secs(25))
+        .max_idle_timeout(IdleTimeout::try_from(Duration::from_secs(60)).ok())
+        .build();
     Endpoint::builder(presets::Minimal)
         .secret_key(key)
+        .transport_config(transport)
         .alpns(vec![ALPN.to_vec(), PAIR_ALPN.to_vec()])
         .relay_mode(RelayMode::Disabled)
         .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
