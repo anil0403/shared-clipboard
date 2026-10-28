@@ -43,7 +43,8 @@ apps can add things without breaking older ones.
 | `hello` | `name`, `platform`, `protocol`, `features` (list) | none | Sent first by both sides on every connection. May be sent again at any time; it replaces the earlier one |
 | `clip` | `id`, `time_ms`, `formats`: [{`mime`, `size`}], `files`: [{`name`, `size`}], `latest` (optional) | the formats' data in order, then the files' data in order | A clipboard item |
 | `offer` | `id`, `time_ms`, `size`, `mimes`, `file_names`, `latest` (optional) | none | An item that wasn't sent: too big, or the receiver is on mobile data |
-| `request` | `id` | none | Send me this item; answered with a `clip` |
+| `request` | `id` | none | Send me this item; answered with a `clip`, or `missing` |
+| `missing` | `id` | none | Answers a `request` for an item the device doesn't have (any more), or while it's paused, so the asking device stops waiting |
 | `peers` | `devices`: [{`id`, `name`, `platform`, `addrs`}] | none | These devices are paired with me; trust them too |
 | `unpair` | `id` | none | Forget device `id`. If `id` is the sender, it forgot you. One naming the receiver is ignored |
 
@@ -60,12 +61,15 @@ The only feature so far is `metered`: the device is on mobile data. A device sen
 - **Catch-up:** when a device gets the first `hello` on a connection, it sends its newest item, as a `clip` or an
   `offer` by the rules above, with `"latest": true`. The receiver uses it only if its `time_ms` is newer than the
   newest item it has, so a device that was away gets what was copied meanwhile without undoing newer copies.
-- **Files:** a receiver saves files under its own folder and makes each name safe for that: `/`, `\` and NUL become
-  `_`, and an empty name, `.` or `..` becomes `file`. The item keeps the original `name`, so its id doesn't change.
+- **Files:** a receiver saves files under its own folder and makes each name safe for that: `/`, `\` and control
+  characters become `_`, a name is cut to 200 bytes, and an empty name, `.` or `..` becomes `file`. The item keeps
+  the original `name`, so its id doesn't change.
+- **Names:** before showing a device or file name from another device, a receiver drops control characters and
+  text-direction overrides (they could drive a terminal or disguise the name) and cuts device names to 64 characters.
 - **Limits:** a header is at most 64 KB. A `clip` body bigger than 25 MiB plus 1 MiB is refused, unless it answers a
   `request` (then the offer's size plus 1 MiB). A pairing message is at most 64 KB.
-- **No echo:** when the app reports a clipboard change whose id is the item the core just gave it, the core doesn't
-  send it again.
+- **No echo:** when the app reports a clipboard change whose id is one of the last 8 items the core gave it, the core
+  doesn't send it again.
 - **Not sent:** password-manager items. The apps leave them out before they reach the core.
 
 ## Pairing (`sharedclip/pair/1`)
@@ -89,7 +93,8 @@ reached A. A device handles one pairing at a time; another one meanwhile gets `r
 3. Both save each other. B also trusts the listed devices. A sends `peers` with B to its other paired devices.
 
 ### With a code (two devices without a camera)
-B found A through discovery and connects.
+B found A through discovery and connects. A answers only while it shows a pairing link (its pair screen is open);
+otherwise it replies `rejected` at once, without asking its user, so a stranger can't pop up prompts.
 
 1. B → A: `{"type":"pair-code","commit":<hex BLAKE3 of nonce_b>,"name":…,"platform":…}`
 2. A → B: `{"type":"nonce","nonce":<nonce_a, hex, 32 random bytes>,"name":…,"platform":…}`
@@ -108,3 +113,5 @@ B commits to its nonce before seeing A's, so someone in the middle can't pick no
 - `unpair` from a paired device removes the device it names.
 - When the user unpairs a device, the core sends `unpair` with that device's id to its other connected devices, and
   `unpair` with its own id to the removed one, then closes the connection. Devices that are offline then aren't told.
+- A device remembers the devices it removed (by its user or by `unpair`) and ignores them in `peers` and `paired`, so
+  a device that was offline can't bring them back. Only pairing with that device directly again trusts it again.

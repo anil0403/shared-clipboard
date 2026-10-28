@@ -111,7 +111,7 @@ struct MenuContent: View {
         if !model.history.isEmpty {
             Section("History") {
                 ForEach(model.history.prefix(10), id: \.id) { clip in
-                    Button(clip.summary) { Clipboard.write(clip) }
+                    Button(clip.summary) { Task { await model.copy(clip) } }
                 }
             }
         }

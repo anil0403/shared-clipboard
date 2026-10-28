@@ -167,6 +167,28 @@ async fn link_pairing_then_items_arrive() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn history_lists_summaries_and_item_reads_the_data() {
+    let (a, mut b, _da, db) = two().await;
+    let long = "line one\n".repeat(100);
+    a.node.copy(text(&long), vec![]).await.unwrap();
+    let clip = next(&mut b.clips).await;
+    let item = b.node.history().remove(0);
+    assert_eq!(item.text.as_deref(), Some(&long[..300]));
+    assert_eq!(
+        (item.size, item.mimes),
+        (900, vec!["text/plain;charset=utf-8".to_string()])
+    );
+    assert_eq!(b.node.item(clip.id.clone()).await.unwrap(), clip);
+
+    // After a restart it's read from disk.
+    b.node.stop().await;
+    drop(b);
+    let b = start(db.path(), "B").await;
+    assert_eq!(b.node.item(clip.id.clone()).await.unwrap().formats, clip.formats);
+    assert!(matches!(b.node.item("00".repeat(32)).await, Err(Error::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn files_with_clashing_names_all_arrive() {
     let (a, mut b, _da, _db) = two().await;
     let src = tempdir().unwrap();
@@ -199,6 +221,37 @@ async fn echo_is_not_sent_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn copy_returns_once_the_device_has_it() {
+    let (a, mut b, _da, _db) = two().await;
+    let src = tempdir().unwrap();
+    let path = src.path().join("big.bin");
+    std::fs::write(&path, vec![3u8; 10_000_000]).unwrap();
+    let file = File {
+        name: "big.bin".into(),
+        path: path.to_string_lossy().into_owned(),
+        size: 0,
+    };
+    a.node.copy(vec![], vec![file]).await.unwrap();
+    // A goes away right after: B has it all already.
+    a.node.stop().await;
+    let clip = next(&mut b.clips).await;
+    assert_eq!(std::fs::metadata(&clip.files[0].path).unwrap().len(), 10_000_000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn late_echoes_are_not_sent_back() {
+    let (mut a, mut b, _da, _db) = two().await;
+    a.node.copy(text("x"), vec![]).await.unwrap();
+    let x = next(&mut b.clips).await;
+    a.node.copy(text("y"), vec![]).await.unwrap();
+    let y = next(&mut b.clips).await;
+    // B's watcher reports both, after both arrived.
+    b.node.copy(x.formats, x.files).await.unwrap();
+    b.node.copy(y.formats, y.files).await.unwrap();
+    quiet(&mut a.clips).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn big_items_are_offered_then_fetched() {
     let (a, mut b, _da, _db) = two().await;
     let size = SIZE_CAP + 1_000_000;
@@ -218,6 +271,23 @@ async fn big_items_are_offered_then_fetched() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn found_keeps_a_working_connection() {
+    let (a, mut b, _da, _db) = two().await;
+    let big = vec![Format {
+        mime: "application/octet-stream".into(),
+        data: vec![9; SIZE_CAP as usize + 1],
+    }];
+    a.node.copy(big, vec![]).await.unwrap();
+    let offer = next(&mut b.offers).await;
+    let node = b.node.clone();
+    let fetch = tokio::spawn(async move { node.fetch(offer.id).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Discovery reports A at an address B didn't have (loopback; the link had A's network addresses).
+    b.node.found(a.id.clone(), format!("127.0.0.1:{}", a.node.port()));
+    assert!(within(fetch).await.unwrap().is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fetch_fails_when_the_device_goes_away() {
     let (a, mut b, _da, _db) = two().await;
     let big = vec![Format {
@@ -227,13 +297,25 @@ async fn fetch_fails_when_the_device_goes_away() {
     a.node.copy(big, vec![]).await.unwrap();
     let offer = next(&mut b.offers).await;
 
-    // A doesn't answer (it's paused), then goes away while B waits.
-    a.node.set_paused(true);
+    // A goes away while it sends.
     let node = b.node.clone();
     let fetch = tokio::spawn(async move { node.fetch(offer.id).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
     a.node.stop().await;
     assert!(within(fetch).await.unwrap().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_fails_at_once_when_the_device_is_paused() {
+    let (a, mut b, _da, _db) = two().await;
+    let big = vec![Format {
+        mime: "application/octet-stream".into(),
+        data: vec![8; SIZE_CAP as usize + 1],
+    }];
+    a.node.copy(big, vec![]).await.unwrap();
+    let offer = next(&mut b.offers).await;
+    a.node.set_paused(true);
+    let fetch = tokio::time::timeout(Duration::from_secs(5), b.node.fetch(offer.id)).await;
+    assert!(matches!(fetch, Ok(Err(Error::NotFound))));
 }
 
 /// B found A through discovery and pairs by comparing codes.
@@ -242,6 +324,8 @@ async fn code_pairing(accept_on_a: bool) -> (Dev, Dev, Result<Device, Error>, [T
     let mut a = start(da.path(), "A").await;
     let mut b = start(db.path(), "B").await;
     b.node.found(a.id.clone(), format!("127.0.0.1:{}", a.node.port()));
+    // A's user opened the pair screen.
+    a.node.pairing_link();
     let (node, id) = (b.node.clone(), a.id.clone());
     let pairing = tokio::spawn(async move { node.pair_device(id).await });
 
@@ -273,6 +357,18 @@ async fn code_pairing_rejected() {
     assert!(a.node.devices().is_empty() && b.node.devices().is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn code_pairing_needs_the_pair_screen_open() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let mut a = start(da.path(), "A").await;
+    let b = start(db.path(), "B").await;
+    b.node.found(a.id.clone(), format!("127.0.0.1:{}", a.node.port()));
+    let result = within(b.node.pair_device(a.id.clone())).await;
+    assert!(matches!(result, Err(Error::PairingRejected)));
+    // A's user was never asked.
+    assert!(a.codes.try_recv().is_err());
+}
+
 async fn three() -> (Dev, Dev, Dev, [TempDir; 3]) {
     let dirs = [tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap()];
     let a = start(dirs[0].path(), "A").await;
@@ -300,6 +396,22 @@ async fn unpair_spreads() {
     wait_until(|| !paired(&a, &c.id) && !paired(&b, &c.id) && !paired(&c, &a.id)).await;
     assert!(online(&a, &b.id) && online(&b, &a.id));
     assert!(matches!(a.node.unpair(c.id.clone()).await, Err(Error::UnknownDevice)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpaired_device_stays_out_until_paired_again() {
+    let (a, c, _da, _dc) = two().await;
+    a.node.unpair(c.id.clone()).await.unwrap();
+    // D pairs with C, then A joins D: D lists C, but A doesn't take it back.
+    let dd = tempdir().unwrap();
+    let d = start(dd.path(), "D").await;
+    pair(&c, &d).await;
+    pair(&d, &a).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!paired(&a, &c.id));
+    // Pairing with C directly trusts it again.
+    pair(&c, &a).await;
+    assert!(paired(&a, &c.id) && paired(&c, &a.id));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -339,6 +451,22 @@ async fn catch_up_on_reconnect() {
     // B's newest item is older than A's, so A doesn't take it.
     quiet(&mut a.clips).await;
     quiet(&mut b.clips).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_went_away_is_dialed_again() {
+    let (a, b, _da, db) = two().await;
+    let (b_id, port) = (b.id.clone(), b.node.port());
+    b.node.stop().await;
+    drop(b);
+    wait_until(|| !online(&a, &b_id)).await;
+    // B comes back on the same port, but without A's addresses, so only A can dial.
+    let peers = db.path().join("peers.json");
+    let mut list: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(&peers).unwrap()).unwrap();
+    list.iter_mut().for_each(|p| p["addrs"] = serde_json::json!([]));
+    std::fs::write(&peers, serde_json::to_vec(&list).unwrap()).unwrap();
+    let _b = start_on(db.path(), "B", port).await;
+    wait_until(|| online(&a, &b_id)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -436,6 +564,19 @@ async fn paused_sends_and_takes_nothing() {
     a.node.set_paused(false);
     a.node.copy(text("sent"), vec![]).await.unwrap();
     assert_eq!(next(&mut b.clips).await.formats, text("sent"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_data_folder_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let a = start(&dir, "A").await;
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    a.node.stop().await;
 }
 
 /// A port nothing listens on right now.

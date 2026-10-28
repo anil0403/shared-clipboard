@@ -16,7 +16,7 @@ use tokio::{sync::oneshot, time::timeout};
 use crate::{
     Device, Error,
     node::{Inner, parse_addrs},
-    protocol::{MAX_PAIR_MSG, PAIR_ALPN, PairMsg, PeerInfo, net, read_frame, write_frame},
+    protocol::{MAX_NAME, MAX_PAIR_MSG, PAIR_ALPN, PairMsg, PeerInfo, clean, net, read_frame, write_frame},
 };
 
 const LINK_TTL: Duration = Duration::from_secs(10 * 60);
@@ -127,6 +127,7 @@ pub async fn pair_device(inner: &Arc<Inner>, id: &str) -> Result<Device, Error> 
         return Err(Error::PairingRejected);
     };
     let nonce_a = decode_nonce(&nonce)?;
+    let name = clean(&name, MAX_NAME);
     write_frame(
         &mut send,
         &PairMsg::Reveal {
@@ -165,6 +166,7 @@ fn joined(inner: &Arc<Inner>, id: PublicKey, addrs: &[SocketAddr], reply: PairMs
     else {
         return Err(Error::PairingRejected);
     };
+    let name = clean(&name, MAX_NAME);
     let addrs = addrs.iter().map(|a| a.to_string()).collect();
     let peer = PeerInfo {
         id: id.to_string(),
@@ -172,7 +174,7 @@ fn joined(inner: &Arc<Inner>, id: PublicKey, addrs: &[SocketAddr], reply: PairMs
         platform,
         addrs,
     };
-    inner.add_peers(vec![peer]);
+    inner.add_paired(peer);
     let introduced = inner.add_peers(devices);
     inner.emit_devices();
     inner.connect(&id.to_string());
@@ -192,9 +194,14 @@ pub async fn respond(inner: Arc<Inner>, conn: Connection, addr: Option<SocketAdd
     let Ok(Ok((mut send, mut recv))) = timeout(STEP_TIMEOUT, conn.accept_bi()).await else {
         return;
     };
-    let peer = match Busy::start(&inner) {
-        Ok(_busy) => check(&inner, &conn, addr, &mut send, &mut recv).await.ok().flatten(),
-        Err(_) => None,
+    // Read the first message before taking the pairing slot, so a device that says nothing doesn't hold it.
+    let first = step(&mut recv).await;
+    let peer = match (first, Busy::start(&inner)) {
+        (Ok(first), Ok(_busy)) => check(&inner, &conn, addr, first, &mut send, &mut recv)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
     };
     let reply = match &peer {
         Some(peer) => {
@@ -205,7 +212,7 @@ pub async fn respond(inner: Arc<Inner>, conn: Connection, addr: Option<SocketAdd
                 .filter(|p| p.id != peer.id)
                 .cloned()
                 .collect();
-            inner.add_peers(vec![peer.clone()]);
+            inner.add_paired(peer.clone());
             PairMsg::Paired {
                 name: inner.name.clone(),
                 platform: inner.platform,
@@ -229,19 +236,22 @@ async fn check(
     inner: &Inner,
     conn: &Connection,
     addr: Option<SocketAddr>,
+    first: PairMsg,
     send: &mut SendStream,
     recv: &mut RecvStream,
 ) -> Result<Option<PeerInfo>, Error> {
     let id = conn.remote_id();
-    let peer = |name, platform| PeerInfo {
+    let peer = |name: String, platform| PeerInfo {
         id: id.to_string(),
-        name,
+        name: clean(&name, MAX_NAME),
         platform,
         addrs: addr.iter().map(|a| a.to_string()).collect(),
     };
-    match step(recv).await? {
+    match first {
         PairMsg::Pair { secret, name, platform } => Ok(take_link(inner, &secret).then(|| peer(name, platform))),
-        PairMsg::PairCode { commit, name, platform } => {
+        // Only while this device shows a pairing link (its pair screen is open), so a stranger on the network can't
+        // pop up pairing prompts, or hold the one pairing slot, whenever they like.
+        PairMsg::PairCode { commit, name, platform } if link_open(inner) => {
             let nonce_a: [u8; 32] = rand::random();
             let nonce = HEXLOWER.encode(&nonce_a);
             write_frame(
@@ -263,7 +273,7 @@ async fn check(
             let code = code(&inner.ep.id(), &id, &nonce_a, &nonce_b);
             let device = Device {
                 id: id.to_string(),
-                name: name.clone(),
+                name: clean(&name, MAX_NAME),
                 platform,
                 online: true,
             };
@@ -286,6 +296,10 @@ fn take_link(inner: &Inner, secret: &str) -> bool {
         s.link = None;
     }
     ok
+}
+
+fn link_open(inner: &Inner) -> bool {
+    inner.lock().link.as_ref().is_some_and(|l| l.expires > Instant::now())
 }
 
 /// Compares in constant time, so the time to answer doesn't give the secret away.

@@ -6,7 +6,7 @@ import UIKit
 /// Risks, untested until it runs on a device:
 /// - Share extensions get about 120 MB of memory; the node and large images must fit.
 /// - If the app is running too, two nodes use the same identity and data folder at once.
-/// - Large files may need longer than the 3 s it waits after `copy`.
+/// - `copy` waits until the devices have it, but gives up (and the extension closes) after 30 s plus 1 s per MB.
 final class ShareViewController: UIViewController {
     private let label = UILabel()
 
@@ -31,9 +31,6 @@ final class ShareViewController: UIViewController {
         await model.waitForDevices()
         await model.send(providers)
         if let message = model.message { label.text = message }
-        // `copy` only starts sending; stop() would cut it off.
-        // ponytail: a fixed 3 s wait; switch to a core call that waits for delivery if one is added.
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
         await model.stop()
         extensionContext?.completeRequest(returningItems: nil, completionHandler: nil)
     }

@@ -55,7 +55,7 @@ pub struct Format {
 }
 
 /// A copied file. On copy, `path` is where it is; on receive, where the core saved it (inside `data_dir`).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct File {
     pub name: String,
     pub path: String,
@@ -71,6 +71,21 @@ pub struct Clip {
     /// When it was copied, in milliseconds since 1970, by the sender's clock.
     pub time_ms: u64,
     pub formats: Vec<Format>,
+    pub files: Vec<File>,
+}
+
+/// A history item without its data; `Node::item` gets the whole item.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Summary {
+    pub id: String,
+    pub from: String,
+    pub time_ms: u64,
+    /// Its formats' MIME types.
+    pub mimes: Vec<String>,
+    /// Total size in bytes, formats and files.
+    pub size: u64,
+    /// The first 300 characters of its `text/plain` format, if it has one.
+    pub text: Option<String>,
     pub files: Vec<File>,
 }
 
@@ -125,7 +140,8 @@ pub struct Node {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Node {
-    /// Loads or creates this device's key, starts listening and connects to paired devices it can reach.
+    /// Loads or creates this device's key, starts listening and connects to paired devices it can reach. Devices
+    /// that are offline are dialed again now and then (5 s, doubling up to 5 minutes apart).
     /// Must be called on a tokio runtime (UniFFI provides one); the node keeps running on it.
     #[uniffi::constructor]
     pub async fn start(config: Config, events: Arc<dyn Events>) -> Result<Arc<Self>, Error> {
@@ -144,14 +160,17 @@ impl Node {
         self.inner.port
     }
 
-    /// Discovery found device `id` at `addr` (e.g. "192.168.1.5:47820"). Connects if it's paired; remembers the
-    /// address for `pair_device` if not.
+    /// Discovery found device `id` at `addr` (e.g. "192.168.1.5:47820"). Connects if it's paired and not connected;
+    /// remembers the address for later, or for `pair_device` if it isn't paired.
     pub fn found(&self, id: String, addr: String) {
         self.inner.found(&id, &addr)
     }
 
-    /// The local clipboard changed. Sends the item to the paired devices, unless it's the one the core just gave
-    /// the app (`Events::on_clip`). Leave out password-manager items before calling this; the core sends all it gets.
+    /// The local clipboard changed. Sends the item to the paired devices, unless it's one of the last 8 the core gave
+    /// the app (`Events::on_clip`, `fetch`). Leave out password-manager items before calling this; the core sends
+    /// all it gets. Returns once each connected device has it (or turned it down, or went away), or with
+    /// `Error::Network` after 30 s plus 1 s per MB while the sends go on: don't hold up the clipboard watcher on it.
+    /// Items go into the history in the order the calls start.
     pub async fn copy(&self, formats: Vec<Format>, files: Vec<File>) -> Result<(), Error> {
         self.inner.copy(formats, files).await
     }
@@ -162,9 +181,14 @@ impl Node {
         self.inner.fetch(&id).await
     }
 
-    /// The last 50 items, newest first.
-    pub fn history(&self) -> Vec<Clip> {
-        self.inner.lock().history.clone()
+    /// The last 50 items, newest first, without their data.
+    pub fn history(&self) -> Vec<Summary> {
+        self.inner.lock().history.iter().map(|m| m.summary()).collect()
+    }
+
+    /// A whole history item, read from disk: e.g. to put an old item back on the clipboard.
+    pub async fn item(&self, id: String) -> Result<Clip, Error> {
+        self.inner.item(&id).await
     }
 
     /// The paired devices.
@@ -173,7 +197,8 @@ impl Node {
     }
 
     /// A link to show as a QR code: this device's id, addresses and a one-time secret, valid for 10 minutes.
-    /// A new link replaces the previous one.
+    /// A new link replaces the previous one. Call it when the pair screen opens: while a link is valid, this device
+    /// also answers code pairing (`pair_device` on another device); otherwise it refuses it without asking.
     pub fn pairing_link(&self) -> String {
         pairing::link(&self.inner)
     }
@@ -183,7 +208,8 @@ impl Node {
         pairing::pair_link(&self.inner, &link).await
     }
 
-    /// Pairs with a device found by discovery, comparing a 6-digit code (`Events::on_pairing_code`).
+    /// Pairs with a device found by discovery, comparing a 6-digit code (`Events::on_pairing_code`). The other
+    /// device must have its pair screen open (`pairing_link`).
     pub async fn pair_device(&self, id: String) -> Result<Device, Error> {
         pairing::pair_device(&self.inner, &id).await
     }
@@ -196,6 +222,12 @@ impl Node {
     /// Forgets device `id`, and tells the other paired devices to forget it too.
     pub async fn unpair(&self, id: String) -> Result<(), Error> {
         self.inner.unpair(&id).await
+    }
+
+    /// The device's network changed (e.g. it joined another Wi-Fi): checks the connections, and dials the paired
+    /// devices that are offline now instead of at their next try.
+    pub async fn network_change(&self) {
+        self.inner.network_change().await
     }
 
     /// On mobile data or a limited network: text still goes right away, everything else becomes an offer.

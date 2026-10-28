@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
-use sharedclip::{Clip, Config, Device, Error, Events, Node, Offer, Platform};
+use sharedclip::{Clip, Config, Device, Error, Events, Node, Offer, Platform, Summary};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -203,8 +203,17 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
     let n = node.clone();
     tokio::spawn(async move {
         while let Some((formats, files)) = rx.recv().await {
-            if let Err(err) = n.copy(formats, files).await {
-                eprintln!("send: {err}");
+            let n = n.clone();
+            let mut copy = Box::pin(async move {
+                if let Err(err) = n.copy(formats, files).await {
+                    eprintln!("send: {err}");
+                }
+            });
+            // `copy` waits until the devices have it: start it here, so it keeps its place in line, then let it
+            // finish on its own while the next item goes.
+            let started = std::future::poll_fn(|cx| std::task::Poll::Ready(copy.as_mut().poll(cx))).await;
+            if started.is_pending() {
+                tokio::spawn(copy);
             }
         }
     });
@@ -452,7 +461,7 @@ async fn session(
 }
 
 /// One history line: age, where it came from and what it is.
-fn summary(clip: &Clip, from: &str) -> String {
+fn summary(clip: &Summary, from: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -463,27 +472,15 @@ fn summary(clip: &Clip, from: &str) -> String {
         60..1440 => format!("{}h", mins / 60),
         _ => format!("{}d", mins / 1440),
     };
-    let text = clip.formats.iter().find(|f| f.mime.starts_with("text/plain"));
-    let what = match text {
-        Some(f) => String::from_utf8_lossy(&f.data)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(60)
-            .collect(),
+    let what = match &clip.text {
+        Some(text) => text.lines().next().unwrap_or_default().chars().take(60).collect(),
         None if !clip.files.is_empty() => clip
             .files
             .iter()
             .map(|f| f.name.as_str())
             .collect::<Vec<_>>()
             .join(", "),
-        None => clip
-            .formats
-            .iter()
-            .map(|f| f.mime.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
+        None => clip.mimes.join(", "),
     };
     format!("{age:>4}  {:<20}  {}", clean(from), clean(&what))
 }

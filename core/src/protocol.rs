@@ -3,7 +3,7 @@
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{Clip, Error, Platform};
+use crate::{Error, Platform};
 
 pub const ALPN: &[u8] = b"sharedclip/1";
 pub const PAIR_ALPN: &[u8] = b"sharedclip/pair/1";
@@ -28,6 +28,9 @@ pub enum Msg {
     Clip(ClipMsg),
     Offer(OfferMsg),
     Request {
+        id: String,
+    },
+    Missing {
         id: String,
     },
     Peers {
@@ -67,7 +70,7 @@ pub struct OfferMsg {
 }
 
 /// One format in a `clip` header.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormatPart {
     pub mime: String,
     pub size: u64,
@@ -169,19 +172,21 @@ pub fn hash_part(h: &mut blake3::Hasher, name: &str, len: u64) {
     h.update(&len.to_le_bytes());
 }
 
+/// Longest device name we keep, in characters.
+pub const MAX_NAME: usize = 64;
+/// Longest file name we hand to the app, in characters.
+pub const MAX_FILE_NAME: usize = 200;
+
+/// A name another device sent, without control characters (they could drive a terminal) or text-direction
+/// overrides, and at most `max` characters.
+pub fn clean(name: &str, max: usize) -> String {
+    let bad = |c: char| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    name.chars().filter(|&c| !bad(c)).take(max).collect()
+}
+
 /// An item id is 64 lowercase hex characters; we check it before using it in a path.
 pub fn valid_id(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// Total size of an item's formats and files.
-pub fn size(clip: &Clip) -> u64 {
-    clip.formats.iter().map(|f| f.data.len() as u64).sum::<u64>() + clip.files.iter().map(|f| f.size).sum::<u64>()
-}
-
-/// Text only: goes right away even to a metered device.
-pub fn is_text(clip: &Clip) -> bool {
-    clip.files.is_empty() && clip.formats.iter().all(|f| f.mime.starts_with("text/"))
 }
 
 #[cfg(test)]
@@ -194,6 +199,13 @@ mod tests {
         assert!(matches!(msg, Msg::Unknown));
         let msg: Msg = serde_json::from_str(r#"{"type":"request","id":"ab","extra":[1,2]}"#).unwrap();
         assert!(matches!(msg, Msg::Request { id } if id == "ab"));
+    }
+
+    #[test]
+    fn names_are_cleaned() {
+        assert_eq!(clean("Anil's\x1b[31m Mac\n", MAX_NAME), "Anil's[31m Mac");
+        assert_eq!(clean("a\u{202e}b", MAX_NAME), "ab");
+        assert_eq!(clean(&"x".repeat(100), MAX_NAME).len(), 64);
     }
 
     #[test]

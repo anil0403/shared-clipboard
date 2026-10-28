@@ -49,7 +49,7 @@ struct ContentView: View {
                 }
                 Section("History (tap to copy)") {
                     ForEach(model.history, id: \.id) { clip in
-                        Button(clip.summary) { Clipboard.write(clip) }
+                        Button(clip.summary) { Task { await model.copy(clip) } }
                     }
                 }
                 Toggle("Pause", isOn: $model.paused)
