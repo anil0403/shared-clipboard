@@ -231,8 +231,8 @@ impl Node {
         self.inner.unpair(&id).await
     }
 
-    /// The device's network changed (e.g. it joined another Wi-Fi): checks the connections, and dials the paired
-    /// devices that are offline now instead of at their next try.
+    /// The device's network changed (e.g. it joined another Wi-Fi), or a phone woke up: drops the connections that
+    /// don't answer within 5 s, and dials the paired devices that are offline now instead of at their next try.
     pub async fn network_change(&self) {
         self.inner.network_change().await
     }

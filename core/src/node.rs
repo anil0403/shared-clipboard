@@ -41,12 +41,15 @@ const MAX_OFFERS: usize = 50;
 const MAX_DELIVERED: usize = 8;
 /// Two connections made within this time of each other are a simultaneous dial; a later one is a reconnect.
 const SIMULTANEOUS: Duration = Duration::from_secs(3);
+/// How long a device has to answer when `network_change` checks its connection.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 // Why we closed a connection.
 const CLOSE_STOP: u32 = 0;
 const CLOSE_DUPLICATE: u32 = 1;
 const CLOSE_NOT_PAIRED: u32 = 2;
 const CLOSE_UNPAIRED: u32 = 3;
+const CLOSE_SILENT: u32 = 4;
 
 pub struct Inner {
     pub ep: Endpoint,
@@ -393,9 +396,31 @@ impl Inner {
         }
     }
 
-    /// The network changed: let iroh check its paths, and dial every offline device now.
+    /// The network changed, or the phone woke: let iroh check its paths, drop the connections that don't answer, and
+    /// dial every offline device now. QUIC's idle timer runs on a clock that stops while a phone sleeps, so without the
+    /// check a phone that slept away from home shows its devices online for up to another minute awake.
     pub async fn network_change(&self) {
         self.ep.network_change().await;
+        let conns: Vec<Connection> = self.lock().conns.values().map(|c| c.conn.clone()).collect();
+        let mut checks = tokio::task::JoinSet::new();
+        for conn in conns {
+            let hello = self.hello();
+            checks.spawn(async move {
+                // Any packet back (the ack for our hello is enough) means it's there.
+                let heard = conn.stats().udp_rx.datagrams;
+                let answered = tokio::time::timeout(CHECK_TIMEOUT, async {
+                    let _ = send_msg(&conn, &hello).await;
+                    while conn.stats().udp_rx.datagrams == heard {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await;
+                if answered.is_err() {
+                    conn.close(VarInt::from_u32(CLOSE_SILENT), b"silent");
+                }
+            });
+        }
+        checks.join_all().await;
         self.lock().redial.clear();
         self.wake.notify_one();
     }
