@@ -75,6 +75,12 @@ fun Context.service(action: String? = null, id: String? = null) {
     startForegroundService(Intent(this, ClipService::class.java).setAction(action).putExtra("id", id))
 }
 
+/** Closes the pairing code dialog and its notification. */
+fun Context.endPairing() {
+    Shared.pairing = null
+    getSystemService(NotificationManager::class.java).cancel(ClipService.PAIRING)
+}
+
 /** Runs a core call, showing what went wrong as a toast. Starts the core first if it isn't running. */
 fun Context.call(block: suspend (Node) -> Unit) {
     if (Shared.node == null) service()
@@ -207,7 +213,8 @@ class ClipService : Service() {
 
         override fun onPairingCode(device: Device, code: String) {
             Shared.scope.launch {
-                Shared.pairing = device to code
+                val pairing = device to code
+                Shared.pairing = pairing
                 nm.notify(
                     PAIRING,
                     Notification.Builder(this@ClipService, ALERTS)
@@ -218,6 +225,13 @@ class ClipService : Service() {
                         .setAutoCancel(true)
                         .build(),
                 )
+                // The core gives up after 2 minutes (CONFIRM_TIMEOUT), or sooner if the other device says no,
+                // without telling us. So close the dialog then.
+                delay(120_000)
+                if (Shared.pairing == pairing) {
+                    endPairing()
+                    toast("Pairing with ${device.name} didn't go through")
+                }
             }
         }
     }

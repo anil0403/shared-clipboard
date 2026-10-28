@@ -1,7 +1,6 @@
 package com.noobsbot.sharedclip
 
 import android.Manifest
-import android.app.NotificationManager
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
@@ -278,8 +277,13 @@ private fun PairScreen(onDone: () -> Unit) {
                 supportingContent = { Text("Tap to pair by comparing a code") },
                 modifier = Modifier.clickable {
                     context.call {
-                        context.toast("Paired with ${it.pairDevice(device.id).name}")
-                        onDone()
+                        try {
+                            context.toast("Paired with ${it.pairDevice(device.id).name}")
+                            onDone()
+                        } finally {
+                            // Rejected or timed out: the code dialog would stay open.
+                            if (Shared.pairing?.first?.id == device.id) context.endPairing()
+                        }
                     }
                 },
             )
@@ -293,8 +297,7 @@ private fun CodeDialog() {
     val (device, code) = Shared.pairing ?: return
     val context = LocalContext.current
     fun answer(accept: Boolean) {
-        Shared.pairing = null
-        context.getSystemService(NotificationManager::class.java).cancel(ClipService.PAIRING)
+        context.endPairing()
         runCatching { Shared.node?.confirmPairing(device.id, accept) }
     }
     AlertDialog(

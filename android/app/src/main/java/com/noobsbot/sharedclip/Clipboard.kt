@@ -172,7 +172,10 @@ fun Context.send(text: CharSequence?, html: String?, uris: List<Uri>) {
         } finally {
             parts.forEach { runCatching { it.input.close() } }
         }
-        if (formats.isNotEmpty() || files.isNotEmpty()) app.call { it.copy(formats, files) }
+        if (formats.isNotEmpty() || files.isNotEmpty()) app.call {
+            it.copy(formats, files)
+            Shared.historyVersion++
+        }
     }
 }
 
