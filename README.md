@@ -15,12 +15,12 @@ same network (with or without internet). Bluetooth and the internet (with accoun
 
 ## Install
 
-From [Releases](https://github.com/anil0403/shared-clipboard/releases):
+From [Releases](https://github.com/noobsbot-team/shared-clipboard/releases):
 
 - **Linux:** one command installs the latest release, checks its signature and starts the service. Run it again to
   update.
   ```sh
-  curl -fsSL https://raw.githubusercontent.com/anil0403/shared-clipboard/main/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/noobsbot-team/shared-clipboard/main/install.sh | sh
   ```
   It installs `~/.local/bin/sharedclip` and the systemd user service. To remove it:
   `systemctl --user disable --now sharedclip && rm ~/.local/bin/sharedclip ~/.config/systemd/user/sharedclip.service`.

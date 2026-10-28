@@ -2,7 +2,7 @@
 # Installs or updates Shared Clipboard for Linux from the latest GitHub release, checks its signature, and starts the
 # service. Run it again to update. README.md has the one-line command.
 set -eu
-repo=anil0403/shared-clipboard
+repo=noobsbot-team/shared-clipboard
 # minisign.pub in the repository.
 key=RWRo2xOK8e1+BWY1HYBQBMQdef+gOvhMYXOiZq3TKpBk6RCcNSY6veNK
 bin=$HOME/.local/bin
