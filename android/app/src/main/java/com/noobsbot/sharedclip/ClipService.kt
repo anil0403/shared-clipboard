@@ -60,6 +60,8 @@ object Shared {
     var historyVersion by mutableIntStateOf(0)
     /** Items too big to send right away (Events.onOffer), newest first, until downloaded. */
     val offers = mutableStateListOf<Offer>()
+    /** Why Bluetooth can't reach the desktops (set by Bluetooth.update()), or null. */
+    var bluetoothProblem by mutableStateOf<BluetoothProblem?>(null)
 }
 
 data class Nearby(val id: String, val name: String)
@@ -115,6 +117,7 @@ class ClipService : Service() {
     private var wifiCaps: NetworkCapabilities? = null
     private var discovering = false
     private var discoveryTimer: Job? = null
+    private val bluetooth by lazy { Bluetooth(this) }
 
     override fun onBind(intent: Intent?) = null
 
@@ -127,6 +130,7 @@ class ClipService : Service() {
             ),
         )
         foreground()
+        bluetooth.start()
         Shared.paused = prefs.getBoolean("paused", false)
         // The core opens its sockets in start(), so they must already be on the Wi-Fi.
         @Suppress("DEPRECATION")
@@ -156,6 +160,7 @@ class ClipService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         foreground() // Android wants this after every startForegroundService().
+        bluetooth.update() // the screen calls this on resume, so a newly given permission is used at once
         when (intent?.action) {
             PAUSE -> pause(!Shared.paused)
             DISCOVER -> if (Shared.node != null) discover()
@@ -173,6 +178,7 @@ class ClipService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        bluetooth.stop()
         Shared.node?.let { node ->
             Shared.node = null
             cm.unregisterNetworkCallback(wifiCallback)
@@ -208,6 +214,7 @@ class ClipService : Service() {
             Shared.scope.launch {
                 Shared.devices = devices
                 update()
+                bluetooth.update()
             }
         }
 
@@ -419,7 +426,12 @@ class ClipService : Service() {
 
     /** Tells the core, so it checks its connections and dials the offline devices now. */
     private fun networkChange() {
-        Shared.node?.let { scope.launch { it.networkChange() } }
+        Shared.node?.let {
+            scope.launch {
+                it.networkChange()
+                bluetooth.update()
+            }
+        }
     }
 
     /** Metered Wi-Fi and mobile data count as metered. Data Saver doesn't: it limits other apps' background use. */
