@@ -88,6 +88,19 @@ enum Clipboard {
             if let data = FileManager.default.contents(atPath: file.path) { items.append([type.identifier: data]) }
         }
         UIPasteboard.general.setItems(items, options: [.localOnly: true])
+        markSeen()
+    }
+
+    /// The clipboard's change count when we last looked at or wrote it.
+    private static let seenKey = "seenChangeCount"
+
+    /// Whether something was copied on this device since `markSeen`. Reading the change count doesn't ask the user.
+    static var changedSinceSeen: Bool {
+        UIPasteboard.general.changeCount != UserDefaults.standard.integer(forKey: seenKey)
+    }
+
+    static func markSeen() {
+        UserDefaults.standard.set(UIPasteboard.general.changeCount, forKey: seenKey)
     }
 
     /// What we can send from pasted or shared items: our formats, text and links, other images as PNG, and files.
