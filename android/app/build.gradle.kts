@@ -17,8 +17,8 @@ android {
         minSdk = 29
         targetSdk = 37
         // Set by CI (.github/set-version.sh), never by hand: see VERSIONING.md.
-        versionCode = 1020099
-        versionName = "1.2.0"
+        versionCode = 1030099
+        versionName = "1.3.0"
         // The core is only built for these (see RustCore), so leave out JNA's other ABIs too.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
