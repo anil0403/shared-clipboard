@@ -2,15 +2,32 @@
 # End-to-end: two headless KWins, two `sharedclip daemon`s paired by link; copy on one, paste on the other.
 # Needs kwin_wayland, dbus-run-session, wl-clipboard and ImageMagick. Never touches your session.
 #   cargo build -p sharedclip-linux && bash linux/e2e.sh [sharedclip binary] [work dir]
+# With E2E_X11=1: two Xvfbs and xclip instead of KWin and wl-clipboard.
 BIN=${1:-$PWD/target/debug/sharedclip}; W=${2:-$PWD/target/e2e}
 RA=/run/user/$(id -u)/sc-e2e-a; RB=/run/user/$(id -u)/sc-e2e-b; SOCK=wayland-sce2e
 rm -rf "$W" "$RA" "$RB"; mkdir -p "$W/a" "$W/b"; mkdir -m 700 "$RA" "$RB"
 unset DISPLAY WAYLAND_SOCKET
+if [ -n "$E2E_X11" ]; then
+  # wl-copy and wl-paste as this script uses them, on xclip.
+  mkdir "$W/bin"; PATH=$W/bin:$PATH
+  cat > "$W/bin/wl-copy" <<'X'
+#!/bin/bash
+t=UTF8_STRING; [ "$1" = -t ] && { t=$2; shift 2; }
+if [ $# -gt 0 ]; then printf %s "$1"; else cat; fi | xclip -selection clipboard -t "$t" -i
+X
+  cat > "$W/bin/wl-paste" <<'X'
+#!/bin/bash
+t=UTF8_STRING; while [ $# -gt 0 ]; do [ "$1" = -t ] && { t=$2; shift; }; shift; done
+xclip -selection clipboard -o -t "$t"
+X
+  chmod +x "$W/bin/wl-copy" "$W/bin/wl-paste"
+fi
 FAILED=0
 NAME=$(cat /proc/sys/kernel/hostname) # both daemons are named after it
 cleanup() {
   kill -TERM "${DAEMONS[@]}" 2>/dev/null
   for p in "${BUSES[@]}"; do pkill -TERM -P "$p"; done # each KWin and its D-Bus
+  kill -TERM "${XVFBS[@]}" 2>/dev/null
   wait
   rm -rf "$RA" "$RB"
 }
@@ -18,18 +35,26 @@ trap cleanup EXIT
 # Runs a command on side a or b: its own runtime dir, compositor and data dir.
 on() {
   local r=$RA d=$W/a; [ "$1" = b ] && r=$RB d=$W/b; shift
-  env XDG_RUNTIME_DIR="$r" WAYLAND_DISPLAY=$SOCK XDG_DATA_HOME="$d/data" XDG_CONFIG_HOME="$d/config" \
+  local x=; [ -n "$E2E_X11" ] && x=DISPLAY=:9$([ "$r" = "$RA" ] && echo 1 || echo 2)
+  env $x XDG_RUNTIME_DIR="$r" WAYLAND_DISPLAY=$SOCK XDG_DATA_HOME="$d/data" XDG_CONFIG_HOME="$d/config" \
     XDG_CACHE_HOME="$d/cache" "$@"
 }
 check() { if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAIL: $1: expected [$2], got [$3]"; FAILED=1; fi; }
 
-BUSES=()
-for s in a b; do
-  on $s dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts --socket $SOCK \
-    --width 800 --height 600 > "$W/$s/kwin.log" 2>&1 &
-  BUSES+=($!)
-done
-for _ in $(seq 50); do [ -S "$RA/$SOCK" ] && [ -S "$RB/$SOCK" ] && break; sleep 0.2; done
+BUSES=(); XVFBS=()
+if [ -n "$E2E_X11" ]; then
+  # WAYLAND_DISPLAY names no socket here, as in an X11 session after a Wayland one.
+  Xvfb :91 -nolisten tcp > "$W/a/xvfb.log" 2>&1 & XVFBS+=($!)
+  Xvfb :92 -nolisten tcp > "$W/b/xvfb.log" 2>&1 & XVFBS+=($!)
+  for _ in $(seq 50); do [ -S /tmp/.X11-unix/X91 ] && [ -S /tmp/.X11-unix/X92 ] && break; sleep 0.2; done
+else
+  for s in a b; do
+    on $s dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts --socket $SOCK \
+      --width 800 --height 600 > "$W/$s/kwin.log" 2>&1 &
+    BUSES+=($!)
+  done
+  for _ in $(seq 50); do [ -S "$RA/$SOCK" ] && [ -S "$RB/$SOCK" ] && break; sleep 0.2; done
+fi
 DAEMONS=()
 # No Bluetooth: it would advertise on this computer's real adapter.
 for s in a b; do on $s env SHAREDCLIP_NO_BLUETOOTH=1 "$BIN" daemon >"$W/$s/daemon.log" 2>&1 & DAEMONS+=($!); done
@@ -76,10 +101,19 @@ check "unpair reaches A" "No paired devices. Pair one with: sharedclip pair" "$(
 printf 'y\n' | on a timeout 30 "$BIN" pair > "$W/a/code.out" 2>&1 &
 PAIR=$!
 sleep 1
-printf 'y\n' | on b timeout 30 "$BIN" pair --nearby 1 > "$W/b/code.out" 2>&1
+# By name, not `1`: a real device on the network may sort first, and would get the pairing prompt.
+N=$(on b "$BIN" pair --nearby | grep -m1 "^[0-9]*\. $NAME (linux)" | cut -d. -f1)
+printf 'y\n' | on b timeout 30 "$BIN" pair --nearby "$N" > "$W/b/code.out" 2>&1
 wait $PAIR
 grep -o 'Pairing code with .*' "$W/a/code.out" "$W/b/code.out"
 check "code pairing on B" "Paired with $NAME" "$(grep -o "Paired with .*" "$W/b/code.out")"
 check "code pairing on A" "Paired with $NAME" "$(grep -o "Paired with .*" "$W/a/code.out")"
+if [ -n "$E2E_X11" ]; then
+  # Losing the X server stops the daemon with an error, for systemd to restart; it doesn't panic.
+  kill -KILL "${XVFBS[0]}"
+  wait "${DAEMONS[0]}"
+  check "daemon exits with the X server" 1 $?
+  check "no panic" "" "$(grep -i panicked "$W/a/daemon.log" "$W/b/daemon.log")"
+fi
 [ $FAILED = 0 ] && echo "all passed" || echo "some checks FAILED"
 exit $FAILED

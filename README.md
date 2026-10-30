@@ -1,6 +1,6 @@
 # Shared Clipboard
 
-Copy on one device, paste on another. Works with noobsbot-desktop (Linux, Wayland), macOS, Android and iOS, over the
+Copy on one device, paste on another. Works with noobsbot-desktop and other Linux desktops (Wayland or X11), macOS, Android and iOS, over the
 same network (with or without internet). Bluetooth and the internet (with accounts) come later.
 
 "Shared Clipboard" is a working name.

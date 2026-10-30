@@ -133,10 +133,7 @@ pub fn run() {
     let watcher = match clip::watcher() {
         Ok(watcher) => watcher,
         Err(err) => {
-            eprintln!(
-                "sharedclip: can't watch the clipboard: {err}.\nThe compositor must offer ext-data-control-v1 or \
-                 wlr-data-control: noobsbot-desktop (trusted socket), KDE, Sway, Hyprland, COSMIC and niri do; GNOME doesn't."
-            );
+            eprintln!("sharedclip: can't watch the clipboard: {err}");
             std::process::exit(1);
         }
     };
@@ -147,7 +144,7 @@ pub fn run() {
     }
 }
 
-async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
+async fn serve(watcher: clip::Watcher) -> Result<(), String> {
     let sock = crate::socket_path();
     if UnixStream::connect(&sock).await.is_ok() {
         return Err(format!("already running ({})", sock.display()));
@@ -198,7 +195,7 @@ async fn serve(watcher: wl_clipboard_rs::watch::Watcher) -> Result<(), String> {
     let (failed, mut watch_failed) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let err = clip::watch(watcher, |formats, files| drop(tx.send((formats, files))));
-        let _ = failed.send(err.to_string());
+        let _ = failed.send(err);
     });
     let n = node.clone();
     tokio::spawn(async move {

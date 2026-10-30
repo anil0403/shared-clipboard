@@ -2,7 +2,7 @@
 name = "sharedclip-linux"
 version.workspace = true
 edition.workspace = true
-description = "Shared Clipboard for Linux (Wayland): the background service and its command line"
+description = "Shared Clipboard for Linux (Wayland and X11): the background service and its command line"
 
 [[bin]]
 name = "sharedclip"
@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 sharedclip-core = { path = "../core" }
 wl-clipboard-rs = "0.9.5"
+x11rb = { version = "0.13", features = ["xfixes"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
 mdns-sd = { version = "0.21", default-features = false }
 qrcode = { version = "0.14", default-features = false }

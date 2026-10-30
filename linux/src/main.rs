@@ -1,9 +1,10 @@
-//! Shared Clipboard for Linux (Wayland): `sharedclip daemon` is the background service; the other commands talk to
+//! Shared Clipboard for Linux (Wayland and X11): `sharedclip daemon` is the background service; the other commands talk to
 //! it over its control socket.
 
 mod bluetooth;
 mod clip;
 mod daemon;
+mod x11;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

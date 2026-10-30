@@ -1,10 +1,11 @@
-//! The Wayland clipboard through data-control (wl-clipboard-rs): watch it, set it, and map its types to the core's
-//! `Format`s and `File`s.
+//! The clipboard: watch it, set it, and map its types to the core's `Format`s and `File`s. On Wayland through
+//! data-control (wl-clipboard-rs); with no compositor running, on X11 (see `x11.rs`).
 
 use std::collections::VecDeque;
 use std::env;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -15,15 +16,17 @@ use tokio::net::unix::pipe;
 use tokio::runtime::{Builder, Runtime};
 use wl_clipboard_rs::copy::{self, MimeSource, MimeType, Options, Source};
 use wl_clipboard_rs::paste::{self, Seat};
-use wl_clipboard_rs::watch::{ClipboardEvent, ClipboardType, Watcher};
+use wl_clipboard_rs::watch::{ClipboardEvent, ClipboardType};
+
+use crate::x11;
 
 /// Password managers (KeePassXC, KDE's) offer this type, set to `secret`, with a password.
-const SECRET: &str = "x-kde-passwordManagerHint";
+pub const SECRET: &str = "x-kde-passwordManagerHint";
 /// Besides text, the types we put on the clipboard from another device. Others are dropped: `text/uri-list` or
 /// `x-special/gnome-copied-files` from a peer could make a paste move or open local files.
 const ALLOWED: [&str; 3] = ["text/html", "image/png", "image/jpeg"];
 /// The text types we offer for a text item.
-const TEXT: [&str; 5] = [
+pub const TEXT: [&str; 5] = [
     "text/plain;charset=utf-8",
     "text/plain",
     "UTF8_STRING",
@@ -31,8 +34,8 @@ const TEXT: [&str; 5] = [
     "TEXT",
 ];
 // ponytail: one size and time limit for every type; a bigger image or a slow app is skipped, not offered.
-const MAX_READ: u64 = 100 * 1024 * 1024;
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MAX_READ: u64 = 100 * 1024 * 1024;
+pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Hash of the last item on the clipboard: the compositor's re-offer of its kept copy (when the app that copied quits)
 /// comes back with the same content and is skipped.
@@ -53,13 +56,48 @@ pub fn use_trusted_socket() {
     }
 }
 
-/// Starts watching; fails when the compositor offers no data-control.
-pub fn watcher() -> Result<Watcher, paste::Error> {
-    Watcher::new(ClipboardType::Regular, Seat::Unspecified)
+pub enum Watcher {
+    Wayland(wl_clipboard_rs::watch::Watcher),
+    X11(x11::Watcher),
 }
 
-/// Calls `send` with each new local item: not a password, not ours, not a repeat. Blocks; returns on a Wayland error.
-pub fn watch(mut watcher: Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> paste::Error {
+/// True when this is an X11 session: `$DISPLAY` is set and no compositor answers, whatever the service manager's
+/// environment still says about the last session. GNOME and other compositors without data-control aren't helped by
+/// their Xwayland, which only sees the clipboard while an X app has focus: they get the Wayland error.
+fn on_x11() -> bool {
+    let wayland = env::var_os("WAYLAND_DISPLAY")
+        .filter(|d| !d.is_empty())
+        .is_some_and(|d| {
+            let dir = env::var_os("XDG_RUNTIME_DIR").unwrap_or_default();
+            UnixStream::connect(Path::new(&dir).join(d)).is_ok()
+        });
+    !wayland && env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
+}
+
+/// Starts watching; fails when there's no X server, or the compositor offers no data-control.
+pub fn watcher() -> Result<Watcher, String> {
+    if on_x11() {
+        return x11::watcher().map(Watcher::X11);
+    }
+    let wayland = wl_clipboard_rs::watch::Watcher::new(ClipboardType::Regular, Seat::Unspecified);
+    wayland.map(Watcher::Wayland).map_err(|err| {
+        format!(
+            "{err}.\nThe compositor must offer ext-data-control-v1 or wlr-data-control: noobsbot-desktop (trusted \
+             socket), KDE, Sway, Hyprland, COSMIC and niri do; GNOME doesn't."
+        )
+    })
+}
+
+/// Calls `send` with each new local item: not a password, not ours, not a repeat. Blocks; returns the error that
+/// ended it.
+pub fn watch(watcher: Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> String {
+    match watcher {
+        Watcher::Wayland(watcher) => watch_wayland(watcher, send).to_string(),
+        Watcher::X11(watcher) => x11::watch(watcher, send),
+    }
+}
+
+fn watch_wayland(mut watcher: wl_clipboard_rs::watch::Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> paste::Error {
     // The first event is what was on the clipboard before we started: remembered, not sent.
     let mut first = true;
     loop {
@@ -75,47 +113,61 @@ pub fn watch(mut watcher: Watcher, send: impl Fn(Vec<Format>, Vec<File>)) -> pas
         else {
             continue;
         };
-        if mime_types.iter().any(|m| m == SECRET) {
-            is_new(0); // the clipboard changed: copying the last item again afterwards is sent
-            continue;
+        let read = |mime: &str| offer.receive(mime).ok().and_then(read_pipe);
+        changed(&mime_types, read, first, &send);
+    }
+}
+
+/// Reads the item now on the clipboard, which offers `mime_types`, and sends it unless it should be skipped.
+pub fn changed(
+    mime_types: &[String],
+    mut read: impl FnMut(&str) -> Option<Vec<u8>>,
+    first: bool,
+    send: &impl Fn(Vec<Format>, Vec<File>),
+) {
+    if mime_types.iter().any(|m| m == SECRET) {
+        is_new(0); // the clipboard changed: copying the last item again afterwards is sent
+        return;
+    }
+    let mut read = |mime: &str| {
+        let data = read(mime);
+        if data.is_none() {
+            eprintln!("clipboard: skipped {mime}: unreadable, over 100 MB or slower than 10 s");
         }
-        let mut read = |mime: &str| {
-            let data = offer.receive(mime).ok().and_then(read_pipe);
-            if data.is_none() {
-                eprintln!("clipboard: skipped {mime}: unreadable, over 100 MB or slower than 10 s");
-            }
-            data.filter(|d| !d.is_empty())
-        };
-        let mut files = Vec::new();
-        if mime_types.iter().any(|m| m == "text/uri-list") {
-            files = read("text/uri-list")
-                .map(|d| parse_uri_list(&String::from_utf8_lossy(&d)))
-                .unwrap_or_default();
-        }
-        // File managers also offer the paths as text; a copied file goes as a file only.
-        let formats: Vec<Format> = match files.is_empty() {
-            true => pick(&mime_types)
-                .into_iter()
-                .filter_map(|(from, to)| {
-                    Some(Format {
-                        mime: to.into(),
-                        data: read(from)?,
-                    })
+        data.filter(|d| !d.is_empty())
+    };
+    let mut files = Vec::new();
+    if mime_types.iter().any(|m| m == "text/uri-list") {
+        files = read("text/uri-list")
+            .map(|d| parse_uri_list(&String::from_utf8_lossy(&d)))
+            .unwrap_or_default();
+    }
+    // File managers also offer the paths as text; a copied file goes as a file only.
+    let formats: Vec<Format> = match files.is_empty() {
+        true => pick(mime_types)
+            .into_iter()
+            .filter_map(|(from, to)| {
+                Some(Format {
+                    mime: to.into(),
+                    data: read(from)?,
                 })
-                .collect(),
-            false => Vec::new(),
-        };
-        let h = read_hash(&formats, &files);
-        let (ours, new) = (is_ours(h), is_new(h));
-        if new && !ours && !first && !(formats.is_empty() && files.is_empty()) {
-            send(formats, files);
-        }
+            })
+            .collect(),
+        false => Vec::new(),
+    };
+    let h = read_hash(&formats, &files);
+    let (ours, new) = (is_ours(h), is_new(h));
+    if new && !ours && !first && !(formats.is_empty() && files.is_empty()) {
+        send(formats, files);
     }
 }
 
 /// Puts an item from another device on the clipboard, with every format, and files as `text/uri-list` and
 /// `x-special/gnome-copied-files`. Remembers it, so its change event isn't sent back.
-pub fn set(formats: &[Format], files: &[File]) -> Result<(), copy::Error> {
+pub fn set(formats: &[Format], files: &[File]) -> Result<(), String> {
+    if x11::running() {
+        return x11::set(formats, files);
+    }
     let sources = offer(formats, files);
     remember(set_hash(&sources, files));
     let sources = sources
@@ -127,11 +179,11 @@ pub fn set(formats: &[Format], files: &[File]) -> Result<(), copy::Error> {
         .collect();
     let mut options = Options::new();
     options.omit_additional_text_mime_types(true);
-    options.copy_multi(sources)
+    options.copy_multi(sources).map_err(|err: copy::Error| err.to_string())
 }
 
 /// The (type, data) pairs we offer for an item; the first of a type wins, as in wl-clipboard-rs.
-fn offer(formats: &[Format], files: &[File]) -> Vec<(String, Vec<u8>)> {
+pub fn offer(formats: &[Format], files: &[File]) -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
     let mut add = |mime: &str, data: &[u8]| {
         if !out.iter().any(|(m, _)| m == mime) {
@@ -180,7 +232,7 @@ fn read_hash(formats: &[Format], files: &[File]) -> u64 {
 }
 
 /// The hash `watch` gets for what we offer: it reads no formats when there are files.
-fn set_hash(sources: &[(String, Vec<u8>)], files: &[File]) -> u64 {
+pub fn set_hash(sources: &[(String, Vec<u8>)], files: &[File]) -> u64 {
     let formats = if files.is_empty() {
         read_back(sources)
     } else {
@@ -292,7 +344,7 @@ fn is_ours(hash: u64) -> bool {
 }
 
 /// Remembers `hash` as the last item; false if it already was.
-fn is_new(hash: u64) -> bool {
+pub fn is_new(hash: u64) -> bool {
     std::mem::replace(&mut *LAST.lock().unwrap(), hash) != hash
 }
 

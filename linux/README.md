@@ -1,8 +1,9 @@
 # Shared Clipboard for Linux
 
-A background service that syncs the Wayland clipboard (text, HTML, PNG images and files) with your other devices on
-the same network. It needs a compositor with `ext-data-control-v1` or `wlr-data-control`: noobsbot-desktop, KDE,
-Sway, Hyprland, COSMIC and niri have it; GNOME doesn't.
+A background service that syncs the clipboard (text, HTML, PNG images and files) with your other devices on the same
+network. On X11 it works as is. On Wayland it needs a compositor with
+`ext-data-control-v1` or `wlr-data-control`: noobsbot-desktop, KDE, Sway, Hyprland, COSMIC and niri have it; GNOME
+and Cinnamon's Wayland session don't. It picks by what's running, so one install serves both kinds of session.
 
 ## Install
 A release has `sharedclip` and `sharedclip.service` ready to install: see the [main README](../README.md#install).
@@ -40,5 +41,6 @@ is, like `noobsbot-desktop --trusted sharedclip daemon`.
 
 ## Tests
 `cargo test -p sharedclip-linux` runs the unit tests. With a compositor that has data-control,
-`cargo test -p sharedclip-linux -- --ignored` checks the clipboard for real, and `bash linux/e2e.sh` pairs two
-daemons on two headless KWins and copies text, an image and a file between them.
+`cargo test -p sharedclip-linux live -- --ignored --skip x11` checks the clipboard for real, and `bash linux/e2e.sh`
+pairs two daemons on two headless KWins and copies text, an image and a file between them. For X11, with Xvfb and
+xclip: `xvfb-run -a cargo test -p sharedclip-linux x11 -- --ignored`, and `E2E_X11=1 bash linux/e2e.sh`.
